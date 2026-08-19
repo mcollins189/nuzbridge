@@ -458,7 +458,7 @@ class MemoryProducer(private val profile: MemoryProfile) {
             // the whole window. Attack-animation dips and in-battle menus (switch, bag,
             // move info) all sit inside it; a real battle end does not, because nothing
             // ever sets the flag high again.
-            else -> inBattleNow && (nowMs - lastBattleSeenAt) < BATTLE_EXIT_HOLD_MS
+            else -> inBattleNow && (nowMs - lastBattleSeenAt) < profile.battleHoldMs
         }
         inBattleNow = inBattle
         // gBattlerPartyIndexes is u16[4]: battlers 0/2 are YOUR side, 1/3 the
@@ -775,21 +775,6 @@ class MemoryProducer(private val profile: MemoryProfile) {
     }
 
     companion object {
-        /** How long the battle flag must stay low before the bridge accepts that the
-         *  battle actually ended.
-         *
-         *  A COUNT of consecutive reads was not enough. It absorbed the single-frame dips
-         *  during attack animations, but an in-battle menu (switch Pokemon, bag, move
-         *  info) holds the flag low for as long as the player leaves it open — dozens of
-         *  polls — so the battle view still collapsed to the overworld. Raising the count
-         *  far enough to cover a menu would have delayed every real battle end by the same
-         *  amount, which is just a different bug.
-         *
-         *  Time-based instead, and generous. Over-holding costs only that the battle view
-         *  lingers briefly after a battle ends; under-holding throws the player out of the
-         *  battle view mid-decision, which is what was actually being reported. */
-        private const val BATTLE_EXIT_HOLD_MS = 10_000L
-
         val NATURES = listOf(
             "Hardy","Lonely","Brave","Adamant","Naughty","Bold","Docile","Relaxed","Impish","Lax",
             "Timid","Hasty","Serious","Jolly","Naive","Modest","Mild","Quiet","Bashful","Rash",
@@ -881,6 +866,15 @@ class MemoryProfile(json: JSONObject) {
     val game: String = json.optString("game", "unbound")
     /** Bytes of experience stored at Growth+4. Vanilla is 4; Lazarus uses 2. */
     val expWidth: Int = json.optInt("expWidth", 4)
+    /** Grace period before a low battle flag is believed.
+     *
+     *  Short on purpose: it exists to absorb single-frame dips during attack animations,
+     *  and a couple of polls covers that. It was briefly 10s to survive in-battle MENUS
+     *  on Lazarus, whose flag was not really a battle flag; that is fixed at the source
+     *  now (its profile points at a battle-allocation pointer), and a 10s hold left every
+     *  game showing a stale battle view for ten seconds after every fight. Raise it only
+     *  for a game whose flag is known to drop while the battle is still running. */
+    val battleHoldMs: Long = json.optLong("battleFlagHoldMs", 1_200L)
     val addrs = Addrs(json.getJSONObject("addrs"))
     val speciesById: Map<Int, String> = json.getJSONObject("speciesById").let { o ->
         o.keys().asSequence().associate { it.toInt() to o.getString(it) }
