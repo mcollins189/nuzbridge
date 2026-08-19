@@ -11,12 +11,33 @@ android {
         applicationId = "com.runeshift.nuzbridge"
         minSdk = 30          // AccessibilityService.takeScreenshot(displayId) needs API 30
         targetSdk = 36
-        versionCode = 62
-        versionName = "0.62"
+        versionCode = 63
+        versionName = "0.63"
         // The AYN Thor (Snapdragon) is arm64-only; shipping the other ABIs'
         // OCR libs tripled the APK for nothing.
         ndk { abiFilters += "arm64-v8a" }
     }
+    // A FIXED signing key, committed deliberately.
+    //
+    // Debug builds are otherwise signed with whatever ~/.android/debug.keystore
+    // exists on the build machine — which meant an APK built here and one built
+    // by GitHub Actions had different keys, and Android refused the update with
+    // a signature conflict. That is exactly what happened moving from a
+    // hand-delivered APK to Obtainium.
+    //
+    // This is a dedicated key for THIS app, not the personal debug key, so
+    // publishing it in a public repo cannot affect anything else that is built
+    // on this machine. It grants no privilege beyond identifying updates to
+    // NuzBridge, which is not distributed through any store.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("nuzbridge-debug.keystore")
+            storePassword = "nuzbridge"
+            keyAlias = "nuzbridge"
+            keyPassword = "nuzbridge"
+        }
+    }
+
 
     buildTypes {
         release {

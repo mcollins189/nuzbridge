@@ -12,6 +12,9 @@ captures/
 # Signing material must never be committed
 *.jks
 *.keystore
+# ...except the app's own fixed debug key, which MUST be identical across
+# machines and CI or Android rejects every update as a signature conflict.
+!app/nuzbridge-debug.keystore
 keystore.properties
 
 # Locally staged APKs — releases carry the binary instead, so the repo does not
