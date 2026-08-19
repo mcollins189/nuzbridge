@@ -228,18 +228,38 @@ object BridgeCore {
         networkExposed = on
         ctx.getSharedPreferences("nuzbridge", Context.MODE_PRIVATE)
             .edit().putBoolean("netExposed", on).apply()
-        // Rebind: the bind address is fixed at construction.
-        stopServer()
-        ensureServer()
-        notifyChanged()
+        // Rebind: the bind address is fixed at construction, so the socket has
+        // to be torn down and recreated. stop() releases asynchronously, and
+        // rebinding the same port immediately can lose that race and fail - so
+        // do it off the UI thread with a moment in between.
+        Thread {
+            stopServer()
+            Thread.sleep(400)
+            ensureServer()
+            notifyChanged()
+        }.start()
     }
 
+    /** Where the socket is actually bound, for the UI to show. */
+    @Volatile var boundHost: String = "-"
+
     fun ensureServer() {
-        if (server == null) {
-            val host = if (networkExposed) "0.0.0.0" else "127.0.0.1"
-            server = WsServer(WS_PORT, host) { lastState }
-            server!!.start()
+        if (server != null) return
+        val host = if (networkExposed) "0.0.0.0" else "127.0.0.1"
+        // A failed bind used to be silent: the toggle flipped, nothing listened,
+        // and the UI still looked healthy. Record it instead.
+        try {
+            val s = WsServer(WS_PORT, host) { lastState }
+            s.start()
+            server = s
+            boundHost = host
+            if (lastFailure.startsWith("bind")) lastFailure = "-"
+        } catch (e: Exception) {
+            server = null
+            boundHost = "-"
+            lastFailure = "bind " + host + ":" + WS_PORT + " failed - " + (e.message ?: e.javaClass.simpleName)
         }
+        notifyChanged()
     }
 
     fun stopServer() {

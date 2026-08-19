@@ -206,8 +206,13 @@ class MainActivity : Activity() {
             val ver = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()
             append("NuzBridge v").append(ver ?: "?").append('\n')
             append("Accessibility service: ").append(svc).append('\n')
-            append("WebSocket: ws://127.0.0.1:").append(BridgeCore.WS_PORT)
-                .append("  (").append(clients).append(" client").append(if (clients == 1) "" else "s").append(")\n")
+            // Show the address actually BOUND, not a hardcoded one. The whole
+            // point of the network toggle is that this can differ, and a status
+            // line that always claims 127.0.0.1 hides a failed rebind.
+            append("WebSocket: ws://").append(BridgeCore.boundHost).append(":").append(BridgeCore.WS_PORT)
+                .append("  (").append(clients).append(" client").append(if (clients == 1) "" else "s").append(")")
+            if (BridgeCore.networkExposed) append("  [network access ON]")
+            append("\n")
             append("Game: ").append(BridgeCore.gameKey)
             BridgeCore.profile?.let { append("  (").append(it.locations.size).append(" locations, ").append(it.species.size).append(" species)") }
             append('\n')
