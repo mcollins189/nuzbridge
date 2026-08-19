@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Two stacked screens with a link dot — "dual screen bridge". -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#6c8fff"
+        android:pathData="M30,26h48a4,4 0 0 1 4,4v18a4,4 0 0 1 -4,4h-48a4,4 0 0 1 -4,-4v-18a4,4 0 0 1 4,-4z" />
+    <path android:fillColor="#4ade80"
+        android:pathData="M30,58h48a4,4 0 0 1 4,4v18a4,4 0 0 1 -4,4h-48a4,4 0 0 1 -4,-4v-18a4,4 0 0 1 4,-4z" />
+    <path android:fillColor="#f0eff4" android:pathData="M54,50m-4,0a4,4 0 1 0 8,0a4,4 0 1 0 -8,0" />
+</vector>

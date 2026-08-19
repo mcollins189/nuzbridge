@@ -1,0 +1,145 @@
+{
+  "_comment": [
+    "Maps the content RetroArch reports (GET_STATUS) to a memory profile key.",
+    "GBA ROM headers are useless for this: every hack keeps its base game's",
+    "title and code, so Unbound, Gaia and TRE all read 'POKEMON FIRE'/BPRE.",
+    "CRC32 of the ROM file is the only exact discriminator, with the reported",
+    "content NAME as a fallback for a differently-patched dump.",
+    "",
+    "'strict' entries refuse to match on name alone. Vanilla Emerald must not",
+    "claim 'Pokemon Emerald Rogue' just because the word Emerald appears \u2014",
+    "reading an unknown hack through a vanilla profile is the exact failure",
+    "this file exists to prevent, so an unrecognised CRC stays unrecognised."
+  ],
+  "games": {
+    "unbound": {
+      "crc32": [
+        "4B3D4957"
+      ],
+      "match": [
+        "unbound"
+      ]
+    },
+    "gaia": {
+      "crc32": [
+        "B9465C5A"
+      ],
+      "match": [
+        "gaia"
+      ]
+    },
+    "team_rocket_edition": {
+      "crc32": [
+        "F2D16EBD"
+      ],
+      "match": [
+        "team rocket",
+        "rocket edition"
+      ]
+    },
+    "glazed": {
+      "crc32": [
+        "B56D1A8A"
+      ],
+      "match": [
+        "glazed"
+      ]
+    },
+    "firered_leafgreen": {
+      "crc32": [
+        "84EE4776",
+        "DD88761C"
+      ],
+      "match": [
+        "firered",
+        "fire red",
+        "leafgreen",
+        "leaf green"
+      ],
+      "strict": true
+    },
+    "emerald": {
+      "crc32": [
+        "487491BF",
+        "1F1C08FB"
+      ],
+      "match": [
+        "emerald"
+      ],
+      "strict": true
+    },
+    "outlaw": {
+      "crc32": [
+        "8066C31B"
+      ],
+      "match": [
+        "outlaw"
+      ]
+    },
+    "my_ass": {
+      "crc32": [
+        "1DED7E51"
+      ],
+      "match": [
+        "my ass"
+      ]
+    },
+    "korosu": {
+      "crc32": [
+        "BD7951E5"
+      ],
+      "match": [
+        "korosu"
+      ]
+    },
+    "elysium": {
+      "crc32": [
+        "8F86D9DC",
+        "27FCA545"
+      ],
+      "match": [
+        "elysium"
+      ]
+    },
+    "cawps": {
+      "crc32": [
+        "5375EE7C"
+      ],
+      "match": [
+        "cawps"
+      ]
+    },
+    "vega": {
+      "crc32": [
+        "EA87BD6E"
+      ],
+      "match": [
+        "vega"
+      ]
+    },
+    "sienna": {
+      "crc32": [
+        "1BDC4C00"
+      ],
+      "match": [
+        "sienna"
+      ]
+    },
+    "clover": {
+      "crc32": [
+        "32A408CC"
+      ],
+      "match": [
+        "clover"
+      ]
+    },
+    "odyssey": {
+      "crc32": [
+        "B1783AF2"
+      ],
+      "match": [
+        "odyssey"
+      ]
+    }
+  }
+}

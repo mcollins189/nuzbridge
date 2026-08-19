@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NuzBridge</string>
+    <string name="service_label">NuzBridge screen reader</string>
+    <string name="service_desc">Reads the game screen with on-device OCR to feed the NuzTracker Play mode with your current route and wild encounters. Nothing is stored or sent off the device — data goes only to the tracker page over localhost.</string>
+</resources>
