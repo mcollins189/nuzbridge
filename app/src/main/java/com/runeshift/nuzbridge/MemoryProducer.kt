@@ -237,6 +237,12 @@ class MemoryProducer(private val profile: MemoryProfile) {
             val gOff = 32 + ORDERS[(personality % 24).toInt()].indexOf('G') * 12
             exp = (u32(b, gOff + 4) xor key).toInt()
         }
+        // Some builds store experience as a u16 at Growth+4 rather than the vanilla u32.
+        // Lazarus does: read four bytes there and the upper half belongs to the next
+        // field, giving ~534,773,890 instead of 361. That is not merely a wrong number —
+        // it lands far past the level-100 threshold, so the EXP bar silently showed
+        // nothing. Declared per game via `expWidth` in the profile.
+        if (profile.expWidth == 2) exp = exp and 0xFFFF
         val o = JSONObject()
         o.put("species", profile.speciesById[species] ?: "#$species")
         // Nickname: 10 bytes at +8, in the Gen-3 character encoding. Worth
@@ -873,6 +879,8 @@ class MemoryProducer(private val profile: MemoryProfile) {
 /** Loaded from assets/memory/<game>.json (dump-memory-profile.mjs output). */
 class MemoryProfile(json: JSONObject) {
     val game: String = json.optString("game", "unbound")
+    /** Bytes of experience stored at Growth+4. Vanilla is 4; Lazarus uses 2. */
+    val expWidth: Int = json.optInt("expWidth", 4)
     val addrs = Addrs(json.getJSONObject("addrs"))
     val speciesById: Map<Int, String> = json.getJSONObject("speciesById").let { o ->
         o.keys().asSequence().associate { it.toInt() to o.getString(it) }
