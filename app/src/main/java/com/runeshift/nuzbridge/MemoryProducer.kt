@@ -34,6 +34,8 @@ class MemoryProducer(private val profile: MemoryProfile) {
     private var lastBroadcastAt = 0L
     /** Drives the poll interval — see loop(). */
     @Volatile private var inBattleNow = false
+    /** Consecutive polls that read "not in battle"; see the hysteresis below. */
+    private var battleFalseStreak = 0
     // PC boxes, swept ONE box per poll rather than all at once: the full
     // storage is 14x30x80 = 33.6 KB, which as a single burst would stall the
     // loop, but a box at a time is ~3 extra reads and covers everything every
@@ -422,7 +424,24 @@ class MemoryProducer(private val profile: MemoryProfile) {
         for (b in playerSlots) decodeMon(b)?.let { party.put(it) }
         // Encounter, gated by the exact in-battle flag.
         var encounter: JSONObject? = null
-        val inBattle = read(sock, addr, a.inBattle, 1)?.let { it[0].toInt() != 0 } ?: false
+        // Leaving battle needs CONSECUTIVE negative reads, and a FAILED read holds the
+        // previous state rather than reporting "not in battle".
+        //
+        // Both matter. Field report on Lazarus: the tracker flashed the route view for a
+        // frame mid-attack and then returned to the battle. With no hysteresis a single
+        // zero — whether the flag genuinely dips during an animation or a UDP read is
+        // simply dropped — rewrote the whole payload to the overworld, and the next poll
+        // rewrote it back. `?: false` was the worse half: a lost packet is not evidence
+        // that the battle ended, but it was being treated as exactly that.
+        val rawInBattle = read(sock, addr, a.inBattle, 1)?.let { it[0].toInt() != 0 }
+        val inBattle = when {
+            rawInBattle == true -> { battleFalseStreak = 0; true }
+            rawInBattle == null -> inBattleNow                    // read failed: hold
+            else -> {
+                battleFalseStreak++
+                if (battleFalseStreak >= BATTLE_EXIT_READS) false else inBattleNow
+            }
+        }
         inBattleNow = inBattle
         // gBattlerPartyIndexes is u16[4]: battlers 0/2 are YOUR side, 1/3 the
         // opponent's. [0] already drove our own active-mon focus; [1] is the
@@ -444,6 +463,20 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 if (s1 in 0..5) foeSlot = s1
                 if (s2 in 0..5) mySlot2 = s2
                 if (s3 in 0..5) foe2Slot = s3
+            }
+        }
+        // Fallback for profiles with no gBattlerPartyIndexes (Lazarus, TRE Johto):
+        // focus the first party member that still has HP. Without this mySlot stays -1
+        // and the active-mon block below never runs at all, so the tracker shows NOBODY
+        // on the field for those games.
+        //
+        // This is a heuristic and is deliberately only used when the real address is
+        // absent. It is right whenever the lead is out or a faint forced the switch, and
+        // WRONG if the player switched past a healthy Pokemon — that case needs the real
+        // gBattlerPartyIndexes, which only a live probe can locate.
+        if (inBattle && mySlot < 0) {
+            for (i in 0 until party.length()) {
+                if (party.getJSONObject(i).optInt("hp", 0) > 0) { mySlot = i; break }
             }
         }
         // Wild vs trainer, from gBattleTypeFlags: 0x1 DOUBLE, 0x4 IS_MASTER,
@@ -724,6 +757,11 @@ class MemoryProducer(private val profile: MemoryProfile) {
     }
 
     companion object {
+        /** Negative reads required before the bridge accepts that a battle ended.
+         *  At the 400 ms in-battle poll this costs under a second of latency on a real
+         *  battle end, and absorbs the single-frame dips that were flashing the route. */
+        private const val BATTLE_EXIT_READS = 2
+
         val NATURES = listOf(
             "Hardy","Lonely","Brave","Adamant","Naughty","Bold","Docile","Relaxed","Impish","Lax",
             "Timid","Hasty","Serious","Jolly","Naive","Modest","Mild","Quiet","Bashful","Rash",
