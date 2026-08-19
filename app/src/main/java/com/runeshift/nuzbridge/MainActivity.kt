@@ -179,6 +179,9 @@ class MainActivity : Activity() {
         // the first bind would use the default and the switch would show a
         // state the socket does not actually have.
         BridgeCore.networkExposed = prefs().getBoolean("netExposed", false)
+        // The accessibility service may already have bound the socket using the
+        // default before this ran. Re-apply so the address matches the setting.
+        if (BridgeCore.server != null) BridgeCore.setNetworkExposed(this, BridgeCore.networkExposed)
         if (!BridgeCore.loadRemoteProfile(this)) {
             val savedGame = prefs().getString("game", "unbound") ?: "unbound"
             runCatching { BridgeCore.loadProfile(this, savedGame) }

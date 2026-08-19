@@ -224,7 +224,11 @@ object BridgeCore {
     @Volatile var networkExposed = false
 
     fun setNetworkExposed(ctx: Context, on: Boolean) {
-        if (networkExposed == on) return
+        val want = if (on) "0.0.0.0" else "127.0.0.1"
+        // Compare against where the socket ACTUALLY is. Returning early on the
+        // flag alone left no way to fix a server that had already bound to the
+        // wrong address before the flag was restored.
+        if (networkExposed == on && boundHost == want) return
         networkExposed = on
         ctx.getSharedPreferences("nuzbridge", Context.MODE_PRIVATE)
             .edit().putBoolean("netExposed", on).apply()

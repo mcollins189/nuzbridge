@@ -44,6 +44,12 @@ class BridgeAccessibilityService : AccessibilityService() {
         val prefs = getSharedPreferences("nuzbridge", MODE_PRIVATE)
         BridgeCore.displayId = prefs.getInt("displayId", BridgeCore.displayId)
         BridgeCore.scanning = prefs.getBoolean("scanning", BridgeCore.scanning)
+        // MUST be restored before ensureServer() below. This service can start
+        // without the UI ever opening, and it was binding the socket with the
+        // default (loopback) while MainActivity later set the flag to true —
+        // ensureServer() then returned early because a server already existed,
+        // so the switch read ON while nothing was reachable off-device.
+        BridgeCore.networkExposed = prefs.getBoolean("netExposed", BridgeCore.networkExposed)
         // A tracker-pushed profile wins over the bundled assets; fall back to
         // the asset for the saved game key when none has ever been pushed.
         if (!BridgeCore.loadRemoteProfile(this)) {
