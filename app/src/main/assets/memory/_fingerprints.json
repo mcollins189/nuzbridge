@@ -140,6 +140,14 @@
       "match": [
         "odyssey"
       ]
+    },
+    "lazarus": {
+      "crc32": [
+        "558AE42F"
+      ],
+      "match": [
+        "lazarus"
+      ]
     }
   }
 }
