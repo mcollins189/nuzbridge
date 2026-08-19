@@ -34,8 +34,8 @@ class MemoryProducer(private val profile: MemoryProfile) {
     private var lastBroadcastAt = 0L
     /** Drives the poll interval — see loop(). */
     @Volatile private var inBattleNow = false
-    /** Consecutive polls that read "not in battle"; see the hysteresis below. */
-    private var battleFalseStreak = 0
+    /** When the battle flag was last seen high; drives the exit latch below. */
+    private var lastBattleSeenAt = 0L
     // PC boxes, swept ONE box per poll rather than all at once: the full
     // storage is 14x30x80 = 33.6 KB, which as a single burst would stall the
     // loop, but a box at a time is ~3 extra reads and covers everything every
@@ -434,13 +434,25 @@ class MemoryProducer(private val profile: MemoryProfile) {
         // rewrote it back. `?: false` was the worse half: a lost packet is not evidence
         // that the battle ended, but it was being treated as exactly that.
         val rawInBattle = read(sock, addr, a.inBattle, 1)?.let { it[0].toInt() != 0 }
+        val nowMs = System.currentTimeMillis()
+        // Corroborating read: gBattleTypeFlags is loaded when a battle starts. On some
+        // games it is cleared on the way out, and where it is, a ZERO here is positive
+        // proof the battle is over and we can drop out instantly instead of waiting for
+        // the hold to expire. Where it merely retains its last value (TRE Johto does),
+        // this never fires and the latch below carries the decision — so reading it is
+        // free upside and cannot make the wrong call on its own.
+        val typeFlags = if (a.battleTypeFlags != 0L)
+            read(sock, addr, a.battleTypeFlags, 4)?.let { u32(it, 0) } else null
+        val flagsSayNoBattle = typeFlags == 0L
         val inBattle = when {
-            rawInBattle == true -> { battleFalseStreak = 0; true }
+            rawInBattle == true -> { lastBattleSeenAt = nowMs; true }
             rawInBattle == null -> inBattleNow                    // read failed: hold
-            else -> {
-                battleFalseStreak++
-                if (battleFalseStreak >= BATTLE_EXIT_READS) false else inBattleNow
-            }
+            flagsSayNoBattle -> false                             // corroborated: really over
+            // Latched. A low read only ends the battle once the flag has STAYED low for
+            // the whole window. Attack-animation dips and in-battle menus (switch, bag,
+            // move info) all sit inside it; a real battle end does not, because nothing
+            // ever sets the flag high again.
+            else -> inBattleNow && (nowMs - lastBattleSeenAt) < BATTLE_EXIT_HOLD_MS
         }
         inBattleNow = inBattle
         // gBattlerPartyIndexes is u16[4]: battlers 0/2 are YOUR side, 1/3 the
@@ -491,11 +503,11 @@ class MemoryProducer(private val profile: MemoryProfile) {
         var kind = "wild"
         var kindKnown = false
         var isDouble = false
-        if (inBattle && a.battleTypeFlags != 0L) {
-            read(sock, addr, a.battleTypeFlags, 4)?.let { fb ->
-                val bk = battleKind(u32(fb, 0))
-                if (bk.known) { kindKnown = true; if (bk.trainer) kind = "trainer"; isDouble = bk.double }
-            }
+        // Reuses the value already fetched above for the battle-exit corroboration —
+        // this used to be a second read of the same address on every in-battle poll.
+        if (inBattle && typeFlags != null) {
+            val bk = battleKind(typeFlags)
+            if (bk.known) { kindKnown = true; if (bk.trainer) kind = "trainer"; isDouble = bk.double }
         }
         // gBattlersCount is an INDEPENDENT read of the same fact: 2 in a single
         // battle, 4 in a double (both verified from device snapshots). Doubles
@@ -757,10 +769,20 @@ class MemoryProducer(private val profile: MemoryProfile) {
     }
 
     companion object {
-        /** Negative reads required before the bridge accepts that a battle ended.
-         *  At the 400 ms in-battle poll this costs under a second of latency on a real
-         *  battle end, and absorbs the single-frame dips that were flashing the route. */
-        private const val BATTLE_EXIT_READS = 2
+        /** How long the battle flag must stay low before the bridge accepts that the
+         *  battle actually ended.
+         *
+         *  A COUNT of consecutive reads was not enough. It absorbed the single-frame dips
+         *  during attack animations, but an in-battle menu (switch Pokemon, bag, move
+         *  info) holds the flag low for as long as the player leaves it open — dozens of
+         *  polls — so the battle view still collapsed to the overworld. Raising the count
+         *  far enough to cover a menu would have delayed every real battle end by the same
+         *  amount, which is just a different bug.
+         *
+         *  Time-based instead, and generous. Over-holding costs only that the battle view
+         *  lingers briefly after a battle ends; under-holding throws the player out of the
+         *  battle view mid-decision, which is what was actually being reported. */
+        private const val BATTLE_EXIT_HOLD_MS = 10_000L
 
         val NATURES = listOf(
             "Hardy","Lonely","Brave","Adamant","Naughty","Bold","Docile","Relaxed","Impish","Lax",
