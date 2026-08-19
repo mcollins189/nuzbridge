@@ -866,15 +866,23 @@ class MemoryProfile(json: JSONObject) {
     val game: String = json.optString("game", "unbound")
     /** Bytes of experience stored at Growth+4. Vanilla is 4; Lazarus uses 2. */
     val expWidth: Int = json.optInt("expWidth", 4)
-    /** Grace period before a low battle flag is believed.
+    /** Grace period before a low battle flag is believed. Default ZERO.
      *
-     *  Short on purpose: it exists to absorb single-frame dips during attack animations,
-     *  and a couple of polls covers that. It was briefly 10s to survive in-battle MENUS
-     *  on Lazarus, whose flag was not really a battle flag; that is fixed at the source
-     *  now (its profile points at a battle-allocation pointer), and a 10s hold left every
-     *  game showing a stale battle view for ten seconds after every fight. Raise it only
-     *  for a game whose flag is known to drop while the battle is still running. */
-    val battleHoldMs: Long = json.optLong("battleFlagHoldMs", 1_200L)
+     *  A hold is not the right tool for the two things that actually go wrong. A dropped
+     *  UDP read is handled separately and explicitly (a null read holds the previous
+     *  state, because a lost packet is not evidence a battle ended). And a flag that
+     *  genuinely reads 0 mid-battle means the profile is pointing at the wrong address —
+     *  the fix is the address, not a timer.
+     *
+     *  This existed at 10s, then 1.2s, to work around Lazarus's flag, which turned out
+     *  not to be a battle flag at all: it tracked the active SCREEN and went low whenever
+     *  a menu opened. Once its profile was pointed at a battle-allocation pointer the
+     *  workaround had no job left, but every game was still paying it as latency on the
+     *  battle-to-overworld transition.
+     *
+     *  Kept as a per-profile escape hatch (`battleFlagHoldMs`) for a game whose flag is
+     *  later found to dip for reasons that cannot be fixed by choosing a better address. */
+    val battleHoldMs: Long = json.optLong("battleFlagHoldMs", 0L)
     val addrs = Addrs(json.getJSONObject("addrs"))
     val speciesById: Map<Int, String> = json.getJSONObject("speciesById").let { o ->
         o.keys().asSequence().associate { it.toInt() to o.getString(it) }
