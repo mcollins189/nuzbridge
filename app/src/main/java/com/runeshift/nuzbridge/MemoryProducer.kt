@@ -439,7 +439,19 @@ class MemoryProducer(private val profile: MemoryProfile) {
         // simply dropped — rewrote the whole payload to the overworld, and the next poll
         // rewrote it back. `?: false` was the worse half: a lost packet is not evidence
         // that the battle ended, but it was being treated as exactly that.
-        val rawInBattle = read(sock, addr, a.inBattle, 1)?.let { it[0].toInt() != 0 }
+        // ptrHigh profiles read the WHOLE pointer and require it to land inside EWRAM
+        // (0x02000000..0x0203FFFF), not merely to start with 0x02. Live capture on Pisces:
+        // 0x55555555 at the box screen, 0x02001ab0 in a wild battle. A high-byte-only test
+        // would also accept 0x02F00000, which is not a real address — the range check costs
+        // nothing here because it is the same round trip.
+        val rawInBattle = if (a.inBattlePtrHigh) {
+            read(sock, addr, a.inBattle and 0xFFFFFFFCL, 4)?.let {
+                val v = u32(it, 0)
+                v >= 0x02000000L && v < 0x02040000L
+            }
+        } else {
+            read(sock, addr, a.inBattle, 1)?.let { it[0].toInt() != 0 }
+        }
         val nowMs = System.currentTimeMillis()
         // Corroborating read: gBattleTypeFlags is loaded when a battle starts. On some
         // games it is cleared on the way out, and where it is, a ZERO here is positive
@@ -927,6 +939,15 @@ class MemoryProfile(json: JSONObject) {
         val gMapHeader = o.getLong("gMapHeader")
         val sectionIdOff = o.getInt("sectionIdOff")
         val inBattle = o.getLong("inBattle")
+        // How to READ that byte. Two different signals wear the same field:
+        //   "bool"    — gMain.inBattle, a genuine flag in IWRAM. Non-zero means battle.
+        //   "ptrHigh" — the top byte of a battle-allocation POINTER in EWRAM. Only 0x02
+        //               means "allocated", because that is what an EWRAM address starts
+        //               with. Any other value is whatever else happens to live there.
+        // Treating a ptrHigh profile as a bool is how the PC screen registered as a
+        // battle on Pisces: the byte reads 0xf0 standing at the box system, which is
+        // non-zero, so every menu that touched that allocator looked like a fight.
+        val inBattlePtrHigh = o.optString("inBattleMode", "bool") == "ptrHigh"
         val gameHour = o.optLong("gameHour", 0L)
         val battlerIndexes = o.optLong("battlerIndexes", 0L)
         val battleTypeFlags = o.optLong("battleTypeFlags", 0L)
