@@ -159,6 +159,15 @@
     "johto release"
    ],
    "strict": true
+  },
+  "pisces": {
+   "crc32": [
+    "715F686D"
+   ],
+   "match": [
+    "pisces"
+   ],
+   "strict": true
   }
  }
 }
