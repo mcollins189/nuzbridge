@@ -623,15 +623,22 @@ class MemoryProducer(private val profile: MemoryProfile) {
                     // Which foe your cursor is currently on (party slot, matching
                     // the "slot" field on each team entry).
                     if (targetBattler >= 0 && isDouble) {
-                        // Cursor value -> which foe. Determined by OBSERVATION,
-                        // not by reasoning about position constants: mapping 1 to
-                        // gBattlerPartyIndexes[1] put the focus on the other foe
-                        // every time, confirmed on device across several battles.
-                        // Whatever the cursor is indexing, it is not that array in
-                        // the order assumed, so the pairing is taken from what the
-                        // game actually does. Two attempts to derive this from
-                        // B_POSITION_* naming both came out backwards.
-                        e.put("targetSlot", if (targetBattler == 1) foe2Slot else foeSlot)
+                        // Cursor value -> which foe. Battler 1 is gBattlerPartyIndexes[1]
+                        // and battler 3 is [3]; the ids are the opponent's own left/right
+                        // so they read mirrored on screen (1 sits on YOUR right).
+                        //
+                        // This was inverted until v0.74. The previous pairing was recorded
+                        // as "determined by observation on device", but it was calibrated
+                        // against a targetCursor address that read 0 in every battle — so
+                        // targetBattler was always -1 and this branch never actually ran.
+                        // The observation described a code path that could not execute.
+                        //
+                        // Pinned properly from a live Odyssey double: with the LEFT foe
+                        // (Porygon, enemy party slot 1) highlighted the cursor read 3, and
+                        // with the RIGHT foe (Mawile, slot 0) it read 1 —
+                        // gBattlerPartyIndexes was [0,0,1,1], so 1 -> foeSlot and
+                        // 3 -> foe2Slot.
+                        e.put("targetSlot", if (targetBattler == 1) foeSlot else foe2Slot)
                     }
                     e.remove("hp"); e.remove("maxHp"); e.remove("status")
                     encounter = e
