@@ -438,6 +438,23 @@ class MemoryProducer(private val profile: MemoryProfile) {
         val a = profile.addrs
         // Route via current map header's regionMapSectionId.
         var route: String? = null
+        // The exact map, not just its region name. gMapHeader gives a regionMapSectionId,
+        // and several maps deliberately share one — which is why three separate wild tables
+        // all present as "BASALIN COAST" and cannot be told apart. gSaveBlock1.location
+        // holds the real identity: mapGroup and mapNum at +4/+5.
+        var mapId: String? = null
+        if (a.saveBlock1Ptr != 0L) {
+            read(sock, addr, a.saveBlock1Ptr, 4)?.let { pb ->
+                val sb1 = u32(pb, 0)
+                if (sb1 > 0x02000000L && sb1 < 0x02040000L) {
+                    read(sock, addr, sb1 + 4, 2)?.let { loc ->
+                        val g = loc[0].toInt() and 0xFF
+                        val m = loc[1].toInt() and 0xFF
+                        if (g < 60 && m < 120) mapId = "$g-$m"
+                    }
+                }
+            }
+        }
         read(sock, addr, a.gMapHeader, 0x18)?.let { hdr ->
             if (hdr.size > a.sectionIdOff) route = profile.sectionNames[hdr[a.sectionIdOff].toInt() and 0xFF]
         }
@@ -783,6 +800,9 @@ class MemoryProducer(private val profile: MemoryProfile) {
             if (boxArr.length() > 0) state.put("box", boxArr)
         }
         if (route != null) state.put("route", route)
+        // Which of the region's maps this actually is. Sent alongside the name so a
+        // consumer can distinguish sub-areas that share one; nothing is required to use it.
+        mapId?.let { state.put("mapId", it) }
         if (timeOfDay != null) state.put("timeOfDay", timeOfDay)
         state.put("party", party)
         state.put("encounter", encounter ?: JSONObject.NULL)
@@ -965,6 +985,8 @@ class MemoryProfile(json: JSONObject) {
         val playerParty = o.getLong("playerParty")
         val enemyParty = o.getLong("enemyParty")
         val gMapHeader = o.getLong("gMapHeader")
+        // gSaveBlock1Ptr — optional; without it a profile simply reports no mapId.
+        val saveBlock1Ptr = o.optLong("saveBlock1Ptr", 0L)
         val sectionIdOff = o.getInt("sectionIdOff")
         val inBattle = o.getLong("inBattle")
         // How to READ that byte. Two different signals wear the same field:
