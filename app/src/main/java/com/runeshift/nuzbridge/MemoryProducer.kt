@@ -55,10 +55,37 @@ class MemoryProducer(private val profile: MemoryProfile) {
         thread = null
     }
 
-    /** True only when detection is CONFIDENT and disagrees with this profile. */
+    // The content string this profile was last confirmed against. A cartridge SWAP that
+    // resolves to nothing must not be treated the same as a cartridge that was never
+    // recognised in the first place.
+    @Volatile private var confirmedContent: String? = null
+
+    /**
+     * True when this profile cannot be trusted for what is actually running.
+     *
+     * Two cases, and the second one used to be missed. Detection recognising a DIFFERENT
+     * game is obvious. Detection recognising NOTHING is the dangerous one: "unrecognised →
+     * trust the user" is right for a ROM that is simply absent from the fingerprint table
+     * and was chosen by hand, and catastrophic after a swap — the producer keeps the old
+     * profile AND the old game label, reads the new cartridge through the wrong addresses,
+     * and emits species that map through the old game's name table. They look native, the
+     * tracker's wrong-cartridge check passes, and other games' Pokemon get written into the
+     * run. Reported as "it started adding Pokemon from the current game to what was loaded
+     * before", which is the one failure here with no undo.
+     *
+     * So: unrecognised is tolerated only while the content has not changed since this
+     * profile was last confirmed against it.
+     */
     private fun mismatched(): Boolean {
-        val d = GameDetect.lastGame ?: return false   // unrecognised → trust the user
-        return d != profile.game
+        val d = GameDetect.lastGame
+        if (d != null) {
+            if (d == profile.game) { confirmedContent = GameDetect.lastContent; return false }
+            return true
+        }
+        val now = GameDetect.lastContent ?: return false          // nothing detected at all yet
+        val was = confirmedContent
+        if (was == null) { confirmedContent = now; return false }  // never recognised — user's choice
+        return now != was                                          // swapped into something unknown
     }
 
     private fun loop() {
@@ -73,7 +100,12 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 // Doing it first matters: otherwise the opening poll of a
                 // freshly-switched game emits a full wrong-profile roster
                 // before detection ever runs.
-                if (ticks == 0L || ticks % 10L == 0L) {
+                // Every ~10s normally, but IMMEDIATELY whenever reads are failing. A
+                // cartridge swap looks exactly like reads failing — the old profile's
+                // addresses stop returning anything sensible — so waiting out the rest of
+                // the interval is the one time the answer is already known. That delay is
+                // the lag between changing games and the tracker noticing.
+                if (ticks == 0L || ticks % 10L == 0L || deadPolls > 0) {
                     try { detectGame(sock, addr) } catch (e: Throwable) { /* best-effort */ }
                 }
                 ticks++
@@ -81,8 +113,12 @@ class MemoryProducer(private val profile: MemoryProfile) {
                     // Wrong profile for the running game: emit NOTHING. A wrong
                     // roster is worse than no roster — it writes other games'
                     // Pokemon into the run and there is no undo for that.
-                    lastError = "Wrong profile — RetroArch is running " +
-                        "${GameDetect.lastGame} but this is ${profile.game}. Switching…"
+                    lastError = if (GameDetect.lastGame != null)
+                        "Wrong profile — RetroArch is running ${GameDetect.lastGame} " +
+                        "but this is ${profile.game}. Switching…"
+                    else
+                        "Unrecognised cartridge (${GameDetect.lastContent}) — paused rather than " +
+                        "read it through ${profile.game}'s addresses."
                     lastStateSummary = "[${profile.game}] paused — wrong game loaded"
                     Thread.sleep(1000L)
                     continue
