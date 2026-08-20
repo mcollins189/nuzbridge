@@ -99,11 +99,15 @@ class WsServer(port: Int, host: String = "127.0.0.1", private val currentState: 
      * this by switching to that game's run — the bridge cannot know which RUN
      * the player wants, only which GAME, so the choice among runs stays there.
      */
-    fun announceGame(game: String, content: String) {
+    fun announceGame(game: String?, content: String?) {
         val o = JSONObject()
         o.put("type", "detect")
-        o.put("game", game)
-        o.put("content", content)
+        // NULL is a real answer and has to travel. "Something is loaded and I do not know
+        // what" is exactly when the tracker must stop trusting the last cartridge it heard
+        // about; withholding it left the app naming the previous game until the socket
+        // happened to reconnect.
+        o.put("game", game ?: JSONObject.NULL)
+        o.put("content", content ?: JSONObject.NULL)
         o.put("ts", System.currentTimeMillis())
         runCatching { broadcast(o.toString()) }
     }

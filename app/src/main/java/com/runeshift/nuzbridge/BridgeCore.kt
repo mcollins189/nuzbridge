@@ -98,6 +98,12 @@ object BridgeCore {
      * The cartridge is the source of truth here, not either UI: it is the one
      * thing that cannot be mis-selected.
      */
+    /** Tell the tracker what detection currently says, without touching the profile. */
+    fun announceDetection() {
+        server?.announceGame(GameDetect.lastGame, GameDetect.lastContent)
+        notifyChanged()
+    }
+
     fun onGameDetected(detected: String) {
         if (detected == gameKey && memoryGameKey == detected) return
         val ctx = appContext ?: return

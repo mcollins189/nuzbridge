@@ -105,7 +105,12 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 // addresses stop returning anything sensible — so waiting out the rest of
                 // the interval is the one time the answer is already known. That delay is
                 // the lag between changing games and the tracker noticing.
-                if (ticks == 0L || ticks % 10L == 0L || deadPolls > 0) {
+                // Every ~3 polls, not 10. A swap frequently does NOT fail reads — the new
+                // ROM answers at the old addresses with meaningless data — so deadPolls
+                // stays 0 and the old ten-second interval was the whole delay between
+                // changing cartridges and anything noticing. One GET_STATUS packet is
+                // nothing next to the ~11 memory reads each poll already sends.
+                if (ticks == 0L || ticks % 3L == 0L || deadPolls > 0) {
                     try { detectGame(sock, addr) } catch (e: Throwable) { /* best-effort */ }
                 }
                 ticks++
@@ -181,11 +186,16 @@ class MemoryProducer(private val profile: MemoryProfile) {
         } catch (e: Exception) { return }   // detection is best-effort, never fatal
         if (!reply.startsWith("GET_STATUS")) return
         val r = GameDetect.parse(ctx, reply)
-        GameDetect.record(r)
+        val changed = GameDetect.record(r)
         // A recognised game that is not the one we are decoding means every
         // number this producer is about to emit is wrong. Hand it to BridgeCore,
         // which owns profile loading and the tracker socket.
         if (r.game != null && r.game != profile.game) BridgeCore.onGameDetected(r.game)
+        // Every other CHANGE still has to reach the tracker: a cartridge that resolves to
+        // nothing, or back to the one already loaded. Only a switch was being announced, so
+        // the app went on naming the previous game and simply went stale when the frames
+        // stopped — no way to tell "paused, wrong cartridge" from "the feed died".
+        else if (changed) BridgeCore.announceDetection()
     }
 
     private fun read(sock: DatagramSocket, addr: InetAddress, at: Long, len: Int): ByteArray? {
