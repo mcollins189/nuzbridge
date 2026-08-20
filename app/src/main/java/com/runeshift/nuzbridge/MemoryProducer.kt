@@ -667,8 +667,18 @@ class MemoryProducer(private val profile: MemoryProfile) {
         // Sweep one PC box per poll while out of battle. Catches made with a
         // full party go straight to storage and never touch the party struct,
         // so without this they are invisible to the tracker entirely.
-        if (!inBattle && a.storagePtr != 0L) {
-            read(sock, addr, a.storagePtr, 4)?.let { pb ->
+        // Two ways to reach the storage struct, because not every build has a pointer to
+        // dereference. Emerald keeps gPokemonStoragePtr; Pisces does NOT — gPokemonStorage
+        // is a static EWRAM object there, and a scan of all of EWRAM and IWRAM for its
+        // address turned up nothing to follow. storageBase names the struct directly for
+        // those, and takes precedence when both are present.
+        if (!inBattle && (a.storagePtr != 0L || a.storageBase != 0L)) {
+            val ptrRead: ByteArray? =
+                if (a.storageBase != 0L) ByteArray(4).also { buf ->
+                    var v = a.storageBase
+                    for (i in 0 until 4) { buf[i] = (v and 0xFF).toByte(); v = v shr 8 }
+                } else read(sock, addr, a.storagePtr, 4)
+            ptrRead?.let { pb ->
                 val storage = u32(pb, 0)
                 if (storage > 0x02000000L && storage < 0x03000000L) {
                     val boxBase = storage + 4 + boxCursor.toLong() * 30L * 80L
@@ -955,5 +965,10 @@ class MemoryProfile(json: JSONObject) {
         val execFlags = o.optLong("execFlags", 0L)
         val targetCursor = o.optLong("targetCursor", 0L)
         val storagePtr = o.optLong("storagePtr", 0L)
+        // The storage struct's address itself, for builds with no pointer variable to
+        // follow. Verified on Pisces by two independent derivations meeting: the box-name
+        // array sits at base+0x8344, and base+12 is box 1 slot 0's nickname, which read
+        // "Patty" seconds after she was deposited into box 1.
+        val storageBase = o.optLong("storageBase", 0L)
     }
 }
