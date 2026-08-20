@@ -218,25 +218,42 @@ class MemoryProducer(private val profile: MemoryProfile) {
         val personality = u32(b, 0)
         val otId = u32(b, 4)
         if (personality == 0L && otId == 0L) return null
-        // CFRU: unencrypted, fixed order — species u16 @+32. Vanilla fallback:
-        // classic substructure decrypt.
-        var species = u16(b, 32)
-        if (species !in 1..2999) {
-            val key = personality xor otId
-            val order = ORDERS[(personality % 24).toInt()]
-            val gOff = 32 + order.indexOf('G') * 12
-            species = ((u32(b, gOff) xor key) and 0xFFFF).toInt()
+        // Which layout this is gets DECIDED, not guessed. Two exist: CFRU keeps the
+        // substructures in the clear with species as a u16 at +32, vanilla Gen-3 encrypts
+        // them and shuffles their order by personality.
+        //
+        // The old test was "is the value at +32 a plausible species id, and if not,
+        // decrypt". On an encrypted mon that field is ciphertext, and ciphertext lands in
+        // 1..2999 about one time in twenty — at which point a real Pokemon is reported as
+        // an entirely different one. A wild Toxexot came through as Petripa, a species
+        // that lives two regions away at level 49, and the tracker correctly said it could
+        // not be from that route.
+        //
+        // Gen 3 ships the answer: +28 holds a checksum over the 48 substructure bytes,
+        // summed as u16s. Decrypt, sum, compare. It matches only for a genuinely encrypted
+        // mon, so there is no guessing left — and it costs one pass over 48 bytes.
+        val key = personality xor otId
+        val order = ORDERS[(personality % 24).toInt()]
+        val gOff = 32 + order.indexOf('G') * 12
+        var sum = 0
+        for (i in 0 until 12) {
+            val w = (u32(b, 32 + i * 4) xor key)
+            sum = (sum + (w and 0xFFFF).toInt() + ((w ushr 16) and 0xFFFF).toInt()) and 0xFFFF
         }
+        val encrypted = sum == u16(b, 28)
+        var species = if (encrypted) ((u32(b, gOff) xor key) and 0xFFFF).toInt() else u16(b, 32)
+        // Last resort only: if the checksum says nothing useful (a corrupt or half-written
+        // struct), fall back to whichever reading is in range rather than dropping the mon.
+        if (species !in 1..2999) species = if (encrypted) u16(b, 32) else ((u32(b, gOff) xor key) and 0xFFFF).toInt()
         if (species !in 1..2999) return null
         // exp lives in the Growth block: CFRU plain u32 @+36 (verified: the
         // captured Lv10 Gible reads 560 = the exact Medium-Slow threshold);
         // encrypted vanilla: Growth word 1 (offset gOff+4, XOR key).
-        var exp = u32(b, 36).toInt()
-        if (u16(b, 32) != species) {
-            val key = personality xor otId
-            val gOff = 32 + ORDERS[(personality % 24).toInt()].indexOf('G') * 12
-            exp = (u32(b, gOff + 4) xor key).toInt()
-        }
+        // Same decision, same answer: read exp from the encrypted Growth block or the plain
+        // one. This used to re-derive the layout by comparing +32 against the species it
+        // had just chosen, which agreed with the broken test above and so inherited its
+        // mistakes.
+        var exp = if (encrypted) (u32(b, gOff + 4) xor key).toInt() else u32(b, 36).toInt()
         // Some builds store experience as a u16 at Growth+4 rather than the vanilla u32.
         // Lazarus does: read four bytes there and the upper half belongs to the next
         // field, giving ~534,773,890 instead of 361. That is not merely a wrong number —
@@ -253,10 +270,12 @@ class MemoryProducer(private val profile: MemoryProfile) {
         decodeG3(b, 8, 10)?.let { if (it.isNotEmpty()) o.put("nickname", it) }
         // Held item: Growth block u16 @+34 (plain) / word0 high half (encrypted).
         if (profile.itemsById.isNotEmpty()) {
+            // `encrypted` decides this, not a comparison against the plaintext field.
+            // "+32 disagrees with the species" is only a proxy for encryption, and it fails
+            // in exactly the case that matters: when the ciphertext at +32 happens to equal
+            // the real species id, the plain path is taken on an encrypted mon.
             var itemId = u16(b, 34)
-            if (u16(b, 32) != species) {
-                val key = personality xor otId
-                val gOff = 32 + ORDERS[(personality % 24).toInt()].indexOf('G') * 12
+            if (encrypted) {
                 itemId = (((u32(b, gOff) xor key) shr 16) and 0xFFFFL).toInt()
             }
             // Always present when the producer supports items: "" = holding
@@ -280,9 +299,9 @@ class MemoryProducer(private val profile: MemoryProfile) {
         if (profile.movesById.isNotEmpty()) {
             var aOff = 44
             var akey = 0L
-            if (u16(b, 32) != species) {
-                akey = personality xor otId
-                aOff = 32 + ORDERS[(personality % 24).toInt()].indexOf('A') * 12
+            if (encrypted) {
+                akey = key
+                aOff = 32 + order.indexOf('A') * 12
             }
             val moves = JSONArray()
             for (i in 0 until 4) {
@@ -299,9 +318,8 @@ class MemoryProducer(private val profile: MemoryProfile) {
         // so slots 3..5 are reordered on the way out.
         run {
             var eOff = 56; var mOff = 68; var xkey = 0L
-            if (u16(b, 32) != species) {
-                xkey = personality xor otId
-                val order = ORDERS[(personality % 24).toInt()]
+            if (encrypted) {
+                xkey = key
                 eOff = 32 + order.indexOf('E') * 12
                 mOff = 32 + order.indexOf('M') * 12
             }
