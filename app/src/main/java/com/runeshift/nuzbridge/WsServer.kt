@@ -37,9 +37,18 @@ class WsServer(port: Int, host: String = "127.0.0.1", private val currentState: 
         conn.send(hello.toString())
         // A tracker connecting after detection has already run would otherwise
         // never hear about it and sit on the wrong game until the next sweep.
-        GameDetect.lastGame?.let { g ->
+        // Send this even when nothing was recognised. A null game used to mean NO frame at
+        // all, so an unknown cartridge was indistinguishable from detection never having
+        // run: the producer quietly kept decoding the previous game's profile, emitted an
+        // empty party, and the tracker had nothing to switch to and nothing to report.
+        // The content and crc32 go with it so an unmatched ROM can actually be identified
+        // — that is the one piece of information needed to add it to the fingerprints.
+        if (GameDetect.lastGame != null || GameDetect.lastContent != null) {
             val d = JSONObject()
-            d.put("type", "detect"); d.put("game", g); d.put("content", GameDetect.lastContent)
+            d.put("type", "detect")
+            d.put("game", GameDetect.lastGame)
+            d.put("content", GameDetect.lastContent)
+            d.put("crc32", GameDetect.lastCrc)
             conn.send(d.toString())
         }
         currentState()?.let { conn.send(it.toString()) }

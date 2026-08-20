@@ -7,9 +7,15 @@
   "content NAME as a fallback for a differently-patched dump.",
   "",
   "'strict' entries refuse to match on name alone. Vanilla Emerald must not",
-  "claim 'Pokemon Emerald Rogue' just because the word Emerald appears —",
+  "claim 'Pokemon Emerald Rogue' just because the word Emerald appears \u2014",
   "reading an unknown hack through a vanilla profile is the exact failure",
-  "this file exists to prevent, so an unrecognised CRC stays unrecognised."
+  "this file exists to prevent, so an unrecognised CRC stays unrecognised.",
+  "",
+  "'strict' is for VANILLA entries only: every hack keeps its base game's title,",
+  "so name-matching would let a hack claim Emerald or FireRed. A hack whose own",
+  "token cannot appear in another title does not need it, and marking one strict",
+  "means an unrecognised CRC leaves it undetectable \u2014 Pisces sat on the previous",
+  "game's profile with an empty party and said nothing."
  ],
  "games": {
   "unbound": {
@@ -166,8 +172,7 @@
    ],
    "match": [
     "pisces"
-   ],
-   "strict": true
+   ]
   }
  }
 }
