@@ -438,19 +438,40 @@ class MemoryProducer(private val profile: MemoryProfile) {
         if (off + minOf(40, stride) > b.size) return null
         val pers = u32(b, off); val ot = u32(b, off + 4)
         if (pers == 0L && ot == 0L) return null
-        val species = u16(b, off + 28)
+        // Same two layouts as a party mon, decided the same way — by the CHECKSUM at +28
+        // over the decrypted substructures.
+        //
+        // Reading species at a fixed +28 is the CFRU shape. In a real Gen-3 box record +28
+        // IS that checksum and +32 begins the encrypted substructures, so on a
+        // vanilla-layout game this read a checksum as a species id, found it out of range,
+        // and returned null for every slot. Twelve of the thirteen profiles that know where
+        // storage lives are vanilla-layout, so their PC boxes have been reporting empty —
+        // silently, which is why it looked like the feature simply did not fire.
+        val key = pers xor ot
+        val order = ORDERS[(pers % 24).toInt()]
+        val gOff = off + 32 + order.indexOf('G') * 12
+        var sum = 0
+        var encrypted = false
+        if (off + 80 <= b.size) {
+            for (i in 0 until 12) {
+                val w = (u32(b, off + 32 + i * 4) xor key)
+                sum = (sum + (w and 0xFFFF).toInt() + ((w ushr 16) and 0xFFFF).toInt()) and 0xFFFF
+            }
+            encrypted = sum == u16(b, off + 28)
+        }
+        val species = if (encrypted) ((u32(b, gOff) xor key) and 0xFFFF).toInt() else u16(b, off + 28)
         if (species !in 1..2999) return null
         val o = JSONObject()
         o.put("species", profile.speciesById[species] ?: "#" + species)
         decodeG3(b, off + 8, 10)?.let { if (it.isNotEmpty()) o.put("nickname", it) }
-        val exp = u32(b, off + 32).toInt()
+        val exp = if (encrypted) (u32(b, gOff + 4) xor key).toInt() else u32(b, off + 32).toInt()
         val growth = profile.growthById[species]
         if (growth != null) {
             var lv = 1
             for (n in 1..100) { if (expAt(growth, n) <= exp) lv = n else break }
             o.put("level", lv)
         }
-        val item = u16(b, off + 30)
+        val item = if (encrypted) (((u32(b, gOff) xor key) shr 16) and 0xFFFFL).toInt() else u16(b, off + 30)
         o.put("item", if (item in 1..1299) profile.itemsById[item] ?: "" else "")
         // Personality sits at +0 in the box struct exactly as in the party one,
         // so nature costs nothing here — and a boxed mon that reached the roster
