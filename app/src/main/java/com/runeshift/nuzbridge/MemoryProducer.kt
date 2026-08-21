@@ -543,6 +543,21 @@ class MemoryProducer(private val profile: MemoryProfile) {
         // can fix that, so mapOverrides keys on the mapGroup-mapNum identity from
         // gSaveBlock1.location, which is unique per map, and replaces the name outright.
         mapId?.let { id -> profile.mapOverrides[id]?.let { route = it } }
+        // Movement state. Which encounter POOL you are standing in is not derivable from
+        // the map alone — a route with water has a walking table and a surf table, and only
+        // the avatar flags say which one you are in. Verified live on TRE Johto: the byte
+        // read 0x08 (SURFING, and nothing else) on the water and 0x01 (ON_FOOT) on land,
+        // and it was the only byte in a 32-byte window that moved between the two.
+        var surfing: Boolean? = null
+        if (a.playerAvatar != 0L) {
+            read(sock, addr, a.playerAvatar, 1)?.let { av ->
+                val f = av[0].toInt() and 0xFF
+                // Reject a byte that is claiming everything at once (0xFF is filler, not a
+                // state) or claiming nothing — the same guard that would have caught the
+                // decompression buffer standing in for inBattle.
+                if (f != 0xFF && f != 0x00) surfing = (f and 0x08) != 0
+            }
+        }
         // Party.
         val party = JSONArray()
         val count = read(sock, addr, a.partyCount, 1)?.let { it[0].toInt() and 0xFF } ?: 0
@@ -945,6 +960,7 @@ class MemoryProducer(private val profile: MemoryProfile) {
         // Which of the region's maps this actually is. Sent alongside the name so a
         // consumer can distinguish sub-areas that share one; nothing is required to use it.
         mapId?.let { state.put("mapId", it) }
+        surfing?.let { state.put("surfing", it) }
         if (timeOfDay != null) state.put("timeOfDay", timeOfDay)
         state.put("party", party)
         state.put("encounter", encounter ?: JSONObject.NULL)
@@ -1135,6 +1151,10 @@ class MemoryProfile(json: JSONObject) {
         val gMapHeader = o.getLong("gMapHeader")
         // gSaveBlock1Ptr — optional; without it a profile simply reports no mapId.
         val saveBlock1Ptr = o.optLong("saveBlock1Ptr", 0L)
+        // gPlayerAvatar. Its first byte is a flag bitmask: bit 0 ON_FOOT, bit 1 MACH_BIKE,
+        // bit 2 ACRO_BIKE, bit 3 SURFING, bit 4 UNDERWATER. Optional — a profile without it
+        // simply reports no movement state, exactly as before.
+        val playerAvatar = o.optLong("playerAvatar", 0L)
         val sectionIdOff = o.getInt("sectionIdOff")
         val inBattle = o.getLong("inBattle")
         // How to READ that byte. Two different signals wear the same field:
