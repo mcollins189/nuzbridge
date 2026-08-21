@@ -468,19 +468,36 @@ class MemoryProducer(private val profile: MemoryProfile) {
             }
             encrypted = sum == u16(b, off + 28)
         }
-        val species = if (encrypted) ((u32(b, gOff) xor key) and 0xFFFF).toInt() else u16(b, off + 28)
+        // An UNENCRYPTED box record comes in two shapes, and picking the wrong one loses
+        // the Pokemon silently rather than reporting it wrongly:
+        //   compressed (CFRU, 58-byte slots) — species u16 at +28, exp at +32, item at +30
+        //   flat       (Gaia, 80-byte slots) — species u16 at +32, exp at +36, item at +34,
+        //                                      i.e. laid out exactly like that game's PARTY
+        //                                      record, with +28 left as a zeroed checksum
+        // decodeMon already reads +32 for the party, so a game like Gaia had its party read
+        // correctly while every boxed mon was dropped: +28 is 0 there, and the range check
+        // below turned a real Zigzagoon into an empty slot. Decide by which offset actually
+        // resolves to a species this profile knows, rather than assuming one convention.
+        var flat = false
+        val species = if (encrypted) {
+            ((u32(b, gOff) xor key) and 0xFFFF).toInt()
+        } else {
+            val compressed = u16(b, off + 28)
+            if (compressed in 1..2999 && profile.speciesById.containsKey(compressed)) compressed
+            else { flat = true; u16(b, off + 32) }
+        }
         if (species !in 1..2999) return null
         val o = JSONObject()
         o.put("species", profile.speciesById[species] ?: "#" + species)
         decodeG3(b, off + 8, 10)?.let { if (it.isNotEmpty()) o.put("nickname", it) }
-        val exp = if (encrypted) (u32(b, gOff + 4) xor key).toInt() else u32(b, off + 32).toInt()
+        val exp = if (encrypted) (u32(b, gOff + 4) xor key).toInt() else u32(b, off + if (flat) 36 else 32).toInt()
         val growth = profile.growthById[species]
         if (growth != null) {
             var lv = 1
             for (n in 1..100) { if (expAt(growth, n) <= exp) lv = n else break }
             o.put("level", lv)
         }
-        val item = if (encrypted) (((u32(b, gOff) xor key) shr 16) and 0xFFFFL).toInt() else u16(b, off + 30)
+        val item = if (encrypted) (((u32(b, gOff) xor key) shr 16) and 0xFFFFL).toInt() else u16(b, off + if (flat) 34 else 30)
         o.put("item", if (item in 1..1299) profile.itemsById[item] ?: "" else "")
         // Personality sits at +0 in the box struct exactly as in the party one,
         // so nature costs nothing here — and a boxed mon that reached the roster
