@@ -851,9 +851,25 @@ class MemoryProducer(private val profile: MemoryProfile) {
 
         // Game clock (raw RTC struct; Time Turner offset TBD — see profile note).
         var timeOfDay: String? = null
+        var gameHourNow: Int? = null
         if (a.gameHour != 0L) read(sock, addr, a.gameHour, 1)?.let { hb ->
             val hour = hb[0].toInt() and 0xFF
-            if (hour in 0..23) timeOfDay = if (hour in 6..19) "day" else "night"
+            if (hour in 0..23) {
+                gameHourNow = hour
+                // Two-way day/night is all the vanilla games need. Lazarus has FOUR periods
+                // (morning / noon / evening / night) and an inn that sets them, so a profile
+                // may declare its own bands. Each band is "name:start-end" with wrap allowed,
+                // so night can be 21-3. Falls back to the old rule when absent, leaving every
+                // other profile exactly as it was.
+                val bands = profile.hourBands
+                timeOfDay = if (bands.isEmpty()) {
+                    if (hour in 6..19) "day" else "night"
+                } else {
+                    bands.firstOrNull { (_, lo, hi) ->
+                        if (lo <= hi) hour in lo..hi else (hour >= lo || hour <= hi)
+                    }?.first
+                }
+            }
         }
         // Sweep one PC box per poll while out of battle. Catches made with a
         // full party go straight to storage and never touch the party struct,
@@ -977,6 +993,7 @@ class MemoryProducer(private val profile: MemoryProfile) {
         // Which of the region's maps this actually is. Sent alongside the name so a
         // consumer can distinguish sub-areas that share one; nothing is required to use it.
         mapId?.let { state.put("mapId", it) }
+        gameHourNow?.let { state.put("gameHour", it) }
         surfing?.let { state.put("surfing", it) }
         if (timeOfDay != null) state.put("timeOfDay", timeOfDay)
         state.put("party", party)
@@ -1137,6 +1154,15 @@ class MemoryProfile(json: JSONObject) {
     // by default, so no profile changes behaviour unless it opts in.
     val mapOverrides: Map<String, String> = (json.optJSONObject("mapOverrides") ?: JSONObject()).let { o ->
         o.keys().asSequence().associate { it to o.getString(it) }
+    }
+    // Optional time-of-day bands, as ["morning:4-9", "day:10-17", ...]. Wrap is allowed so
+    // "night:21-3" means 21,22,23,0,1,2,3. Empty leaves the two-way day/night default.
+    val hourBands: List<Triple<String, Int, Int>> = (json.optJSONArray("hourBands") ?: org.json.JSONArray()).let { arr ->
+        (0 until arr.length()).mapNotNull { i ->
+            val parts = arr.optString(i).split(":", "-")
+            if (parts.size == 3) Triple(parts[0], parts[1].toIntOrNull() ?: return@mapNotNull null,
+                                        parts[2].toIntOrNull() ?: return@mapNotNull null) else null
+        }
     }
     val growthById: Map<Int, Int> = (json.optJSONObject("growthById") ?: JSONObject()).let { o ->
         o.keys().asSequence().associate { it.toInt() to o.getInt(it) }
