@@ -670,6 +670,26 @@ class MemoryProducer(private val profile: MemoryProfile) {
         }
         if (inBattle) {
             val enemySlots = readParty(sock, addr, a.enemyParty, 6)
+            // Same fallback the player's side has had, for the foe's. Without
+            // gBattlerPartyIndexes foeSlot stays 0 for the whole battle, so when a
+            // trainer's lead faints and the next one comes out, the panel goes on showing
+            // the CORPSE — reported in TRE Johto: Nidoran at 0/17 still displayed as the
+            // active foe while a healthy Koffing was on the field.
+            //
+            // Only when the real address is absent, and only ever a guess: the first foe
+            // with HP left. That is right whenever a faint forced the switch, which is the
+            // case that was broken, and wrong if a trainer switches a healthy Pokemon out —
+            // which needs the real gBattlerPartyIndexes, and a live probe to find it.
+            if (a.battlerIndexes == 0L) {
+                val alive = (0 until 6).filter { i ->
+                    val m = decodeMon(enemySlots.getOrNull(i))
+                    m != null && m.optInt("hp", 0) > 0
+                }
+                if (alive.isNotEmpty()) {
+                    foeSlot = alive[0]
+                    if (isDouble && alive.size > 1) foe2Slot = alive[1]
+                }
+            }
             decodeMon(enemySlots.getOrNull(foeSlot))?.let { e ->
                 if (e.optInt("maxHp") > 0 && e.optInt("level") in 1..100) {
                     e.put("kind", kind)
