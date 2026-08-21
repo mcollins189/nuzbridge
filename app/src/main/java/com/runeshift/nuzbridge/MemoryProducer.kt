@@ -791,9 +791,16 @@ class MemoryProducer(private val profile: MemoryProfile) {
                     // it, so a PC with five Pokemon reported one. A catch made with a full
                     // party goes straight to the box, so that is the catch itself going
                     // missing.
+                    // TWO different numbers, and conflating them misaligns every box after
+                    // the first. boxStride is the size of one SLOT. boxSpan is the distance
+                    // from one BOX to the next, which is not the same thing on a compressed
+                    // layout: Unbound's records are 58 bytes, so 30 of them fill 1740, and
+                    // then 660 bytes of zero padding run to the next box at 2400. Proven by
+                    // reading it — bytes 1740..2399 of box 1 are entirely zero, and the box
+                    // NAMES sit at base+0x8344, which is 4 + 14*2400.
                     val stride = a.boxStride
                     val boxBytes = 30 * stride
-                    val boxBase = storage + 4 + boxCursor.toLong() * boxBytes.toLong()
+                    val boxBase = storage + 4 + boxCursor.toLong() * a.boxSpan.toLong()
                     val blk = ByteArray(boxBytes)
                     var ok = true
                     var got = 0
@@ -1089,6 +1096,9 @@ class MemoryProfile(json: JSONObject) {
         // Unbound, verified against live RAM — five Pokemon in box 1 that the 80-byte walk
         // could not see past the first).
         val boxStride = o.optInt("boxStride", 80)
+        // Bytes from one box to the next. Defaults to the vanilla 30*80, which is also what
+        // a compressed layout uses when its records are padded out to the same box size.
+        val boxSpan = o.optInt("boxSpan", 30 * 80)
         // The storage struct's address itself, for builds with no pointer variable to
         // follow. Verified on Pisces by two independent derivations meeting: the box-name
         // array sits at base+0x8344, and base+12 is box 1 slot 0's nickname, which read
