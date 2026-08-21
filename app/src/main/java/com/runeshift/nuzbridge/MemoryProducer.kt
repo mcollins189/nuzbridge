@@ -383,6 +383,19 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 val w = u32(b, eOff + (i / 4) * 4) xor xkey
                 ge[i] = ((w shr ((i % 4) * 8)) and 0xFF).toInt()
             }
+            // Where this Pokemon was CAUGHT, from the Misc substructure: pokerus at +0,
+            // metLocation at +1, originsInfo (metLevel in bits 0-6, then game / ball /
+            // OT gender) at +2. The location id indexes the SAME region-map section table
+            // the tracker already uses for the current map, so it resolves to a real name
+            // for every game without any new data. Nothing game-specific here — it rides
+            // on mOff, which is already resolved for both the encrypted and the flat
+            // unencrypted layouts.
+            val miscWord0 = u32(b, mOff) xor xkey
+            val metLocation = ((miscWord0 shr 8) and 0xFFL).toInt()
+            val originsInfo = ((miscWord0 shr 16) and 0xFFFFL).toInt()
+            val metLevel = originsInfo and 0x7F
+            profile.sectionNames[metLocation]?.let { o.put("metLocation", it) }
+            if (metLevel in 1..100) o.put("metLevel", metLevel)
             val ivWord = u32(b, mOff + 4) xor xkey
             // Gen-3 packs the ability SLOT into bit 31 of the same word as the
             // IVs (30 bits of IVs + isEgg + abilityNum). We send the slot rather
@@ -390,7 +403,16 @@ class MemoryProducer(private val profile: MemoryProfile) {
             // so an index is all it needs and we avoid dragging an ability-name
             // table out of the ROM. NOTE this only distinguishes slots 0 and 1 —
             // a hidden ability needs more than this bit and is not resolved here.
-            val abilitySlot = ((ivWord shr 31) and 1L).toInt()
+            // WHERE the ability slot lives is not universal. Vanilla Gen 3 packs it into
+            // bit 31 of the IV word (30 bits of IVs + isEgg + abilityNum). Lazarus, a
+            // pokemon-expansion build, does not: all three party members read 0 there while
+            // the game showed Lillipup with Pickup, its SECOND ability. That mon alone has
+            // bit 29 of the following (ribbons) word set, and the two whose in-game ability
+            // is their first have it clear. Declared per profile rather than sniffed, so no
+            // other game changes behaviour.
+            val abilitySlot = if (profile.abilitySlotWord2Bit >= 0)
+                ((u32(b, mOff + 8) xor xkey) shr profile.abilitySlotWord2Bit and 1L).toInt()
+            else ((ivWord shr 31) and 1L).toInt()
             o.put("abilitySlot", abilitySlot)
             // Resolve to a NAME when the profile carries the ROM's ability table.
             // The tracker's own lists are empty for hack-specific species, so
@@ -503,6 +525,22 @@ class MemoryProducer(private val profile: MemoryProfile) {
         // so nature costs nothing here — and a boxed mon that reached the roster
         // with a blank nature never got one filled in later.
         o.put("nature", NATURES[(pers % 25).toInt()])
+        // Caught location, same Misc substructure as a party mon. Only where that block
+        // actually exists: an encrypted record has it at the personality-ordered offset, a
+        // flat unencrypted one at the vanilla +68. A CFRU COMPRESSED record is 58 bytes and
+        // has no room for it, so it is skipped rather than read off the end of the slot.
+        run {
+            val mOff = if (encrypted) off + 32 + order.indexOf('M') * 12
+                       else if (flat) off + 68 else -1
+            if (mOff >= 0 && mOff + 8 <= b.size) {
+                val xk = if (encrypted) key else 0L
+                val w0 = u32(b, mOff) xor xk
+                val loc = ((w0 shr 8) and 0xFFL).toInt()
+                val lvl = (((w0 shr 16) and 0xFFFFL).toInt()) and 0x7F
+                profile.sectionNames[loc]?.let { o.put("metLocation", it) }
+                if (lvl in 1..100) o.put("metLevel", lvl)
+            }
+        }
         // Types (and the slot-0 ability) come from the SPECIES tables, not from
         // the box record, so they are exactly as trustworthy here as in the
         // party — unlike moves, which genuinely are not in this record.
@@ -1157,6 +1195,9 @@ class MemoryProfile(json: JSONObject) {
     }
     // Optional time-of-day bands, as ["morning:4-9", "day:10-17", ...]. Wrap is allowed so
     // "night:21-3" means 21,22,23,0,1,2,3. Empty leaves the two-way day/night default.
+    // Bit index within the Misc word AFTER the IVs (the vanilla ribbons word) that holds
+    // the ability slot, for builds that moved it off IV-word bit 31. -1 = vanilla behaviour.
+    val abilitySlotWord2Bit: Int = json.optInt("abilitySlotWord2Bit", -1)
     val hourBands: List<Triple<String, Int, Int>> = (json.optJSONArray("hourBands") ?: org.json.JSONArray()).let { arr ->
         (0 until arr.length()).mapNotNull { i ->
             val parts = arr.optString(i).split(":", "-")
