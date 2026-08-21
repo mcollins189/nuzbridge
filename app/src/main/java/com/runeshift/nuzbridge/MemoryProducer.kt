@@ -432,8 +432,10 @@ class MemoryProducer(private val profile: MemoryProfile) {
      * layout implies and are left out; they fill in from party sync the moment
      * the mon is withdrawn.
      */
-    private fun decodeBoxMon(b: ByteArray, off: Int): JSONObject? {
-        if (off + 80 > b.size) return null
+    private fun decodeBoxMon(b: ByteArray, off: Int, stride: Int = 80): JSONObject? {
+        // The fields this reads all sit in the first 40 bytes, so the bound is whichever is
+        // smaller — a compressed record is shorter than the vanilla one.
+        if (off + minOf(40, stride) > b.size) return null
         val pers = u32(b, off); val ot = u32(b, off + 4)
         if (pers == 0L && ot == 0L) return null
         val species = u16(b, off + 28)
@@ -762,17 +764,28 @@ class MemoryProducer(private val profile: MemoryProfile) {
             ptrRead?.let { pb ->
                 val storage = u32(pb, 0)
                 if (storage > 0x02000000L && storage < 0x03000000L) {
-                    val boxBase = storage + 4 + boxCursor.toLong() * 30L * 80L
-                    val blk = ByteArray(2400)
+                    // Box records are NOT always 80 bytes. CFRU stores them compressed —
+                    // Unbound's are 58 — and walking a compressed box at the vanilla stride
+                    // reads slot 0 correctly and then lands mid-record for every slot after
+                    // it, so a PC with five Pokemon reported one. A catch made with a full
+                    // party goes straight to the box, so that is the catch itself going
+                    // missing.
+                    val stride = a.boxStride
+                    val boxBytes = 30 * stride
+                    val boxBase = storage + 4 + boxCursor.toLong() * boxBytes.toLong()
+                    val blk = ByteArray(boxBytes)
                     var ok = true
-                    for (chunk in 0 until 3) {
-                        val part = read(sock, addr, boxBase + chunk * 800L, 800)
-                        if (part == null || part.size < 800) { ok = false; break }
-                        System.arraycopy(part, 0, blk, chunk * 800, 800)
+                    var got = 0
+                    while (got < boxBytes) {
+                        val want = minOf(800, boxBytes - got)
+                        val part = read(sock, addr, boxBase + got.toLong(), want)
+                        if (part == null || part.size < want) { ok = false; break }
+                        System.arraycopy(part, 0, blk, got, want)
+                        got += want
                     }
                     if (ok) {
                         val list = mutableListOf<JSONObject>()
-                        for (slot in 0 until 30) decodeBoxMon(blk, slot * 80)?.let { list.add(it) }
+                        for (slot in 0 until 30) decodeBoxMon(blk, slot * stride, stride)?.let { list.add(it) }
                         boxContents[boxCursor] = list
                         boxSweptAt[boxCursor] = System.currentTimeMillis()
                     } else {
@@ -1051,6 +1064,10 @@ class MemoryProfile(json: JSONObject) {
         val execFlags = o.optLong("execFlags", 0L)
         val targetCursor = o.optLong("targetCursor", 0L)
         val storagePtr = o.optLong("storagePtr", 0L)
+        // Bytes per box slot. 80 is the vanilla Gen-3 BoxPokemon; CFRU compresses it (58 on
+        // Unbound, verified against live RAM — five Pokemon in box 1 that the 80-byte walk
+        // could not see past the first).
+        val boxStride = o.optInt("boxStride", 80)
         // The storage struct's address itself, for builds with no pointer variable to
         // follow. Verified on Pisces by two independent derivations meeting: the box-name
         // array sits at base+0x8344, and base+12 is box 1 slot 0's nickname, which read
