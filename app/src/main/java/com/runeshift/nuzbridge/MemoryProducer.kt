@@ -33,6 +33,7 @@ class MemoryProducer(private val profile: MemoryProfile) {
     private var lastJson: String? = null
     private var lastBroadcastAt = 0L
     /** Drives the poll interval — see loop(). */
+    private val BATTLE_START_READS = 2
     @Volatile private var inBattleNow = false
     /** When the battle flag was last seen high; drives the exit latch below. */
     private var lastBattleSeenAt = 0L
@@ -64,6 +65,9 @@ class MemoryProducer(private val profile: MemoryProfile) {
     // holds that one rather than snapping back to the lead. Cleared when a battle ends so
     // it cannot leak into the next one.
     @Volatile private var lastFoeGuess = 0
+    // Consecutive high reads seen so far. A battle STARTING must be corroborated;
+    // a battle CONTINUING must not, or every animation frame could end it.
+    @Volatile private var highRun = 0
 
     /**
      * True when this profile cannot be trusted for what is actually running.
@@ -559,7 +563,7 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 v >= 0x02000000L && v < 0x02040000L
             }
         } else {
-            read(sock, addr, a.inBattle, 1)?.let { it[0].toInt() != 0 }
+            read(sock, addr, a.inBattle, 1)?.let { (it[0].toInt() and a.inBattleMask) != 0 }
         }
         val nowMs = System.currentTimeMillis()
         // Corroborating read: gBattleTypeFlags is loaded when a battle starts. On some
@@ -571,8 +575,17 @@ class MemoryProducer(private val profile: MemoryProfile) {
         val typeFlags = if (a.battleTypeFlags != 0L)
             read(sock, addr, a.battleTypeFlags, 4)?.let { u32(it, 0) } else null
         val flagsSayNoBattle = typeFlags == 0L
+        if (rawInBattle == true) highRun++ else if (rawInBattle == false) highRun = 0
         val inBattle = when {
-            rawInBattle == true -> { lastBattleSeenAt = nowMs; true }
+            // Rising edge is DEBOUNCED. One high read used to latch the battle on, which
+            // is why a decompression transient could pin the tracker in a fight you had
+            // already left: heal at a Pokemon Center, talk to an NPC, and the pane snapped
+            // back. A real battle stays high for thousands of polls, so demanding two in a
+            // row costs at most one poll of latency and rejects every one-shot glitch.
+            // Once inBattleNow is set this does not apply — a single high read refreshes.
+            rawInBattle == true && (inBattleNow || highRun >= BATTLE_START_READS) ->
+                { lastBattleSeenAt = nowMs; true }
+            rawInBattle == true -> false                          // high once, not yet trusted
             rawInBattle == null -> inBattleNow                    // read failed: hold
             flagsSayNoBattle -> false                             // corroborated: really over
             // Latched. A low read only ends the battle once the flag has STAYED low for
@@ -1120,6 +1133,12 @@ class MemoryProfile(json: JSONObject) {
         // battle on Pisces: the byte reads 0xf0 standing at the box system, which is
         // non-zero, so every menu that touched that allocator looked like a fight.
         val inBattlePtrHigh = o.optString("inBattleMode", "bool") == "ptrHigh"
+        // Which BITS of that byte mean "in battle". gMain+0x439 is a bitfield, not a
+        // plain bool — TRE Johto reads 2 in battle because inBattle is bit 1, while
+        // bit 0 (oamLoadDisabled) is free to be set on its own. Masking says exactly
+        // which bit we mean instead of accepting any non-zero value. Default 0xFF
+        // keeps every existing profile on the old "non-zero" test unchanged.
+        val inBattleMask = o.optInt("inBattleMask", 0xFF)
         val gameHour = o.optLong("gameHour", 0L)
         val battlerIndexes = o.optLong("battlerIndexes", 0L)
         val battleTypeFlags = o.optLong("battleTypeFlags", 0L)
