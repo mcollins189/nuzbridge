@@ -60,6 +60,11 @@ class MemoryProducer(private val profile: MemoryProfile) {
     // recognised in the first place.
     @Volatile private var confirmedContent: String? = null
 
+    // Which foe the no-battler-indexes fallback last settled on, so the end of a battle
+    // holds that one rather than snapping back to the lead. Cleared when a battle ends so
+    // it cannot leak into the next one.
+    @Volatile private var lastFoeGuess = 0
+
     /**
      * True when this profile cannot be trusted for what is actually running.
      *
@@ -576,6 +581,7 @@ class MemoryProducer(private val profile: MemoryProfile) {
             // ever sets the flag high again.
             else -> inBattleNow && (nowMs - lastBattleSeenAt) < profile.battleHoldMs
         }
+        if (!inBattle) lastFoeGuess = 0
         inBattleNow = inBattle
         // gBattlerPartyIndexes is u16[4]: battlers 0/2 are YOUR side, 1/3 the
         // opponent's. [0] already drove our own active-mon focus; [1] is the
@@ -687,7 +693,16 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 }
                 if (alive.isNotEmpty()) {
                     foeSlot = alive[0]
+                    lastFoeGuess = foeSlot
                     if (isDouble && alive.size > 1) foe2Slot = alive[1]
+                } else {
+                    // Every foe down — the trainer is beaten and the battle is running out
+                    // its last frames. "First with HP" has no answer here, and falling back
+                    // to slot 0 snaps the panel to the trainer's LEAD, which is neither on
+                    // the field nor the thing just defeated: reported as "Nidoran sent out"
+                    // after the Koffing that replaced it was knocked out. Hold the last foe
+                    // actually faced instead.
+                    foeSlot = lastFoeGuess
                 }
             }
             decodeMon(enemySlots.getOrNull(foeSlot))?.let { e ->
