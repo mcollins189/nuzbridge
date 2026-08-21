@@ -536,6 +536,13 @@ class MemoryProducer(private val profile: MemoryProfile) {
         read(sock, addr, a.gMapHeader, 0x18)?.let { hdr ->
             if (hdr.size > a.sectionIdOff) route = profile.sectionNames[hdr[a.sectionIdOff].toInt() and 0xFF]
         }
+        // Some maps carry the WRONG regionMapSectionId in the ROM itself, usually because
+        // the hack reused a map from its base game without repointing it. TRE Johto's Five
+        // Island Pokemon Center reports section 144, which really is TWO ISLAND — the game
+        // is not being misread, it is misinformed. Nothing derived from the section byte
+        // can fix that, so mapOverrides keys on the mapGroup-mapNum identity from
+        // gSaveBlock1.location, which is unique per map, and replaces the name outright.
+        mapId?.let { id -> profile.mapOverrides[id]?.let { route = it } }
         // Party.
         val party = JSONArray()
         val count = read(sock, addr, a.partyCount, 1)?.let { it[0].toInt() and 0xFF } ?: 0
@@ -1091,6 +1098,12 @@ class MemoryProfile(json: JSONObject) {
     }
     val sectionNames: Map<Int, String> = json.getJSONObject("sectionNames").let { o ->
         o.keys().asSequence().associate { it.toInt() to o.getString(it) }
+    }
+    // "mapGroup-mapNum" -> the name to show instead of whatever the map header claims.
+    // Only for maps whose regionMapSectionId is wrong in the ROM. Optional and empty
+    // by default, so no profile changes behaviour unless it opts in.
+    val mapOverrides: Map<String, String> = (json.optJSONObject("mapOverrides") ?: JSONObject()).let { o ->
+        o.keys().asSequence().associate { it to o.getString(it) }
     }
     val growthById: Map<Int, Int> = (json.optJSONObject("growthById") ?: JSONObject()).let { o ->
         o.keys().asSequence().associate { it.toInt() to o.getInt(it) }
