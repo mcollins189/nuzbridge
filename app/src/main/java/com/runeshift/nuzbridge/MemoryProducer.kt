@@ -117,6 +117,9 @@ class MemoryProducer(private val profile: MemoryProfile) {
               // mismatched() sat outside every existing catch; now the whole body is
               // covered.
               try {
+                // Liveness, not freshness: advanced every iteration including a paused one,
+                // so the watchdog can tell a held pause from a dead thread.
+                BridgeCore.lastProducerTickAt = System.currentTimeMillis()
                 val okBefore = readsOk
                 // Check the cartridge before the first poll, then every ~10 s.
                 // Doing it first matters: otherwise the opening poll of a

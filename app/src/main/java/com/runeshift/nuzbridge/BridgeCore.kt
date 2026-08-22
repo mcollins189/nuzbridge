@@ -31,6 +31,12 @@ object BridgeCore {
     // Set on every successful memory poll cycle: while fresh (<5s), the OCR
     // scanner auto-defers — two producers must never fight over the route.
     @Volatile var lastMemoryPollAt = 0L
+    // Separate from lastMemoryPollAt on purpose. That one means "data is fresh" and only a
+    // completed poll advances it, so a DELIBERATE pause (wrong profile loaded) freezes it
+    // exactly like a dead thread does -- and the watchdog cannot tell "holding on purpose"
+    // from "died". This one means "the thread is alive", advanced every iteration
+    // including paused ones. Liveness and freshness are different questions.
+    @Volatile var lastProducerTickAt = 0L
     // v0.2 diagnostics: every screenshot attempt is accounted for, failures
     // carry the platform error name, and the raw OCR lines are shown so a
     // wrong-display or font-misread problem is visible at a glance.
@@ -141,14 +147,25 @@ object BridgeCore {
      *
      * Cheap and idempotent -- call it from anywhere that notices the feed is quiet.
      */
-    fun ensureMemoryAlive(ctx: Context, quietMs: Long = 15000L): Boolean {
+    fun ensureMemoryAlive(ctx: Context, quietMs: Long = 8000L): Boolean {
         val p = memoryProducer ?: return false
-        if (lastMemoryPollAt == 0L) return false          // never polled yet: still starting
-        val quiet = System.currentTimeMillis() - lastMemoryPollAt
-        if (quiet < quietMs) return false
+        val now = System.currentTimeMillis()
+        // A thread that is still ticking needs no restart, whatever it is doing. If it is
+        // paused on a wrong profile that is a state to HOLD, and restarting would just
+        // rebuild the same profile and pause again.
+        if (lastProducerTickAt != 0L && now - lastProducerTickAt < quietMs) return false
+        if (lastProducerTickAt == 0L && lastMemoryPollAt == 0L) return false   // still starting
+        val quiet = now - maxOf(lastProducerTickAt, lastMemoryPollAt)
+        // Capture the cause BEFORE tearing the producer down. stopMemoryProducer() nulls
+        // it, and the restart message then overwrote lastFailure -- so the one field that
+        // said WHY the thread stopped was destroyed by the recovery. First recurrence
+        // reported "silent for 25s, restarted" and nothing else, which is the diagnosis
+        // missing exactly the part that matters.
+        val cause = p.lastError.takeIf { it.isNotBlank() && it != "-" && it != "—" }
         stopMemoryProducer()
         val err = startMemoryProducer(ctx)
-        lastFailure = err ?: "memory producer was silent for ${quiet / 1000}s - restarted"
+        lastFailure = err ?: ("memory producer stopped after ${quiet / 1000}s - restarted" +
+            (cause?.let { " (last error: $it)" } ?: " (no error recorded)"))
         notifyChanged()
         return true
     }
