@@ -46,6 +46,12 @@ object BridgeCore {
     @Volatile var rawLines: List<String> = emptyList()
 
     @Volatile var server: WsServer? = null
+    // Whether anyone currently WANTS the server up. The watchdog must not
+    // resurrect a server that was stopped ON PURPOSE (accessibility teardown
+    // with no producer) nor bind inside setNetworkExposed's deliberate 400ms
+    // rebind gap — wanting the server is a statement only ensureServer/
+    // stopServer callers make.
+    @Volatile var serverWanted = true
     // High-fidelity producer: RetroArch RAM reads (exact species/HP/route).
     // Runs alongside or instead of OCR; the tracker treats both identically.
     @Volatile var memoryProducer: MemoryProducer? = null
@@ -107,7 +113,7 @@ object BridgeCore {
     // death was permanent until the switch was toggled by hand — the original
     // reported symptom. Daemon thread, checks are no-ops while healthy.
     private var watchdog: Thread? = null
-    @Synchronized private fun ensureWatchdog(ctx: Context) {
+    @Synchronized fun ensureWatchdog(ctx: Context) {
         if (watchdog?.isAlive == true) return
         val app = ctx.applicationContext
         watchdog = Thread({
@@ -118,7 +124,7 @@ object BridgeCore {
                 // service teardown, nothing ever re-created the server; the producer
                 // polled into null forever. ensureServer is @Synchronized and returns
                 // immediately when server != null, so this is a no-op while healthy.
-                runCatching { ensureServer() }
+                if (serverWanted) runCatching { ensureServer() }
             }
         }, "nuz-watchdog").apply { isDaemon = true; start() }
     }
@@ -226,6 +232,9 @@ object BridgeCore {
             memoryProducer = np
             memoryGameKey = want
             np.start()
+            // Seed liveness so a second caller arriving inside thread-start
+            // latency does not restart the just-started producer.
+            lastProducerTickAt = now
             lastFailure = "memory producer stopped after ${quiet / 1000}s - restarted" +
                 (cause?.let { " (last error: $it)" } ?: " (no error recorded)")
             notifyChanged()
@@ -362,6 +371,7 @@ object BridgeCore {
 
     @Synchronized
     fun ensureServer() {
+        serverWanted = true
         if (server != null) return
         val host = if (networkExposed) "0.0.0.0" else "127.0.0.1"
         // A failed bind used to be silent: the toggle flipped, nothing listened,
@@ -412,6 +422,7 @@ object BridgeCore {
 
     @Synchronized
     fun stopServer() {
+        serverWanted = false
         runCatching { server?.stop(500) }
         server = null
         // Clear the bound address too: a stale boundHost made setNetworkExposed's

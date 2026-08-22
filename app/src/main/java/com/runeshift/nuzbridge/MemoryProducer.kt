@@ -137,7 +137,9 @@ class MemoryProducer(private val profile: MemoryProfile) {
               try {
                 // Liveness, not freshness: advanced every iteration including a paused one,
                 // so the watchdog can tell a held pause from a dead thread.
-                BridgeCore.lastProducerTickAt = System.currentTimeMillis()
+                // Gated on running (same reasoning as the freshness gate): a
+                // retired instance must not vouch for its replacement.
+                if (running) BridgeCore.lastProducerTickAt = System.currentTimeMillis()
                 val okBefore = readsOk
                 // Check the cartridge before the first poll, then every ~10 s.
                 // Doing it first matters: otherwise the opening poll of a
@@ -198,8 +200,17 @@ class MemoryProducer(private val profile: MemoryProfile) {
                     // I can see memory data, but also shows the not-connected
                     // error". Only clear messages WE own; a profile-mismatch
                     // warning is still true regardless of read health.
+                    // "reply correlation lost" and "socket reset" are transient
+                    // socket conditions that used to stick on the status screen
+                    // while data visibly flowed — and ensureMemoryAlive captures
+                    // lastError as the restart CAUSE, so a stale one poisons the
+                    // diagnosis. "reads return -1" clears the same way once
+                    // reads land again.
                     if (lastError.startsWith("RetroArch not responding") ||
-                        lastError.startsWith("read: ") || lastError.startsWith("poll: ")) {
+                        lastError.startsWith("read: ") || lastError.startsWith("poll: ") ||
+                        lastError.startsWith("reply correlation lost") ||
+                        lastError.startsWith("socket reset") ||
+                        lastError.startsWith("reads return -1")) {
                         lastError = "—"
                     }
                 } else {
@@ -305,13 +316,25 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 val parts = String(pkt.data, 0, pkt.length).trim().split(" ")
                 if (parts.size < 2 || parts[0] != "READ_CORE_MEMORY") continue      // e.g. a stray GET_STATUS reply
                 if (!parts[1].removePrefix("0x").equals(wantAddr, ignoreCase = true)) continue  // someone else's reply
-                // A "-1" error reply is still the answer to this request.
-                if (parts.size >= 3 && parts[2] == "-1") { correlated = true; break }
+                // A "-1" error reply is still the answer to this request. Say
+                // so by name: an all-minus-one profile (wrong core, unmapped
+                // address) used to self-diagnose as a socket problem via the
+                // deadPolls reset message.
+                if (parts.size >= 3 && parts[2] == "-1") {
+                    lastError = "reads return -1 — profile/core mismatch?"
+                    correlated = true; break
+                }
                 // Same address but different length identifies a STALE reply from
                 // an earlier differently-sized request at the same base
                 // (readParty's bulk read at `base` vs its per-slot fallback at
                 // `base`). Only the EXACT requested length is our answer; anything
                 // else is a stray to keep draining past.
+                // INVARIANT: RetroArch clamps reads that span a memory-region end
+                // into SHORT replies, which this drains as strays — verified safe
+                // for all 19 shipped profiles (closest read ends ~112KB from a
+                // region end), but a future profile reading near a boundary would
+                // acquire a permanent per-read failure here; keep reads inside
+                // one region.
                 if (parts.size - 2 != len) continue
                 correlated = true
                 result = ByteArray(len) { i -> parts[i + 2].toInt(16).toByte() }
@@ -715,7 +738,8 @@ class MemoryProducer(private val profile: MemoryProfile) {
         }
         // Party.
         val party = JSONArray()
-        val count = read(sock, addr, a.partyCount, 1)?.let { it[0].toInt() and 0xFF } ?: 0
+        val countRead = read(sock, addr, a.partyCount, 1)
+        val count = countRead?.let { it[0].toInt() and 0xFF } ?: 0
         val playerSlots = readParty(sock, addr, a.playerParty, minOf(count, 6))
         for (b in playerSlots) decodeMon(b)?.let { party.put(it) }
         // Encounter, gated by the exact in-battle flag.
@@ -1152,8 +1176,17 @@ class MemoryProducer(private val profile: MemoryProfile) {
         gameHourNow?.let { state.put("gameHour", it) }
         surfing?.let { state.put("surfing", it) }
         if (timeOfDay != null) state.put("timeOfDay", timeOfDay)
-        state.put("party", party)
-        state.put("encounter", encounter ?: JSONObject.NULL)
+        // Party is OMITTED when unknown, matching the route/box convention. A
+        // dropped partyCount packet (or a count>0 whose every slot read failed)
+        // used to ship "party": [] as a live statement that the player has no
+        // Pokémon — the same class of falsehood the box path was hardened
+        // against twice; absent means unknown.
+        if (countRead != null && (count == 0 || party.length() > 0)) state.put("party", party)
+        // Explicit null means "battle over, clear the banner"; a dropped
+        // enemy-party read mid-battle is not that — omit the key (no change)
+        // rather than clearing.
+        if (encounter != null) state.put("encounter", encounter)
+        else if (!inBattle) state.put("encounter", JSONObject.NULL)
         val cmp = state.toString()
         lastStateSummary = buildString {
             append('[').append(profile.game).append("] ")

@@ -51,7 +51,12 @@ class BridgeAccessibilityService : AccessibilityService() {
             // against the old game's token lists and hand the tracker a wrong
             // encounter during the exact window the memory path refuses to speak.
             val pausedMismatch = BridgeCore.memoryProducer?.pausedMismatch == true
-            if (BridgeCore.scanning && !busy && !memoryFresh && !pausedMismatch) scanOnce()
+            // quietMs widened to 30s, so a stalling-but-ticking producer could
+            // cede route/encounter to OCR for up to 25s. A ticking producer is
+            // not a dead feed (liveness vs freshness), and if RetroArch is gone
+            // there is nothing on screen for OCR to read anyway.
+            val memoryAlive = BridgeCore.memoryProducer != null && System.currentTimeMillis() - BridgeCore.lastProducerTickAt < 5000
+            if (BridgeCore.scanning && !busy && !memoryFresh && !pausedMismatch && !memoryAlive) scanOnce()
             handler.postDelayed(this, BridgeCore.SCAN_INTERVAL_MS)
         }
     }
@@ -82,6 +87,10 @@ class BridgeAccessibilityService : AccessibilityService() {
             }
         }
         BridgeCore.ensureServer()
+        // The watchdog was created only by startMemoryProducer, so a user
+        // running OCR-only had no server retry — onServerFatal left the bridge
+        // deaf until the service was toggled.
+        BridgeCore.ensureWatchdog(this)
         // Memory bridge resumes across service restarts too.
         if (prefs.getBoolean("memory", false)) BridgeCore.startMemoryProducer(this)
         handler.post(tick)
