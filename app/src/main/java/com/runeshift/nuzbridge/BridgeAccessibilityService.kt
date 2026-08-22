@@ -23,7 +23,11 @@ class BridgeAccessibilityService : AccessibilityService() {
     private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
     private var parser: OcrParser? = null
     private var parserGame: String? = null
-    private var busy = false
+    // @Volatile: set on the main thread but cleared from the screenshot executor
+    // and ML Kit's completion thread — without it the tick's read has no
+    // happens-before edge from those writes. busyAt backs the timeout below.
+    @Volatile private var busy = false
+    @Volatile private var busyAt = 0L
 
     private val tick = object : Runnable {
         override fun run() {
@@ -34,7 +38,20 @@ class BridgeAccessibilityService : AccessibilityService() {
             // most of these hacks, and the memory reader stayed dead until the switch was
             // toggled by hand. Try to revive it BEFORE handing over.
             if (!memoryFresh) BridgeCore.appContext?.let { BridgeCore.ensureMemoryAlive(it) }
-            if (BridgeCore.scanning && !busy && !memoryFresh) scanOnce()
+            // A lost takeScreenshot or ML Kit callback used to leave busy true for
+            // the life of the service — scanOnce was never called again and there
+            // was no diagnostic. No callback path takes anywhere near 15 s, so
+            // past that the scan is declared lost and the loop moves on.
+            if (busy && busyAt != 0L && System.currentTimeMillis() - busyAt > 15000) {
+                busy = false
+                BridgeCore.lastFailure = "scan timed out — screenshot or OCR callback never returned"
+            }
+            // A producer deliberately paused on a wrong/unknown cartridge is NOT
+            // a dead feed: OCR stepping in would read the new cartridge's screen
+            // against the old game's token lists and hand the tracker a wrong
+            // encounter during the exact window the memory path refuses to speak.
+            val pausedMismatch = BridgeCore.memoryProducer?.pausedMismatch == true
+            if (BridgeCore.scanning && !busy && !memoryFresh && !pausedMismatch) scanOnce()
             handler.postDelayed(this, BridgeCore.SCAN_INTERVAL_MS)
         }
     }
@@ -75,6 +92,11 @@ class BridgeAccessibilityService : AccessibilityService() {
         super.onDestroy()
         BridgeCore.serviceConnected = false
         handler.removeCallbacks(tick)
+        // Release what this service owns. Toggling accessibility off/on leaked
+        // one executor thread and one ML Kit client per cycle — the exact thing
+        // a user debugging the service does repeatedly.
+        runCatching { screenshotExecutor.shutdown() }
+        runCatching { recognizer.close() }
         BridgeCore.stopServer()
         BridgeCore.notifyChanged()
     }
@@ -86,6 +108,7 @@ class BridgeAccessibilityService : AccessibilityService() {
             parserGame = profile.key
         }
         busy = true
+        busyAt = System.currentTimeMillis()
         BridgeCore.scanAttempts++
         takeScreenshot(
             BridgeCore.displayId,

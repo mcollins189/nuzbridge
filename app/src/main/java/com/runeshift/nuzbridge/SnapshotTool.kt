@@ -58,7 +58,17 @@ object SnapshotTool {
                         while (o < len) {
                             val want = minOf(CH, len - o)
                             val chunk = readMem(sock, addr, base + o, want)
-                            os.write(chunk ?: ByteArray(want))   // zero-fill on miss, keep offsets
+                            // Write EXACTLY `want` bytes: zero-fill misses, pad
+                            // short replies, truncate long ones. A short reply
+                            // used to advance the offset by the full amount
+                            // while writing fewer bytes, silently shifting every
+                            // byte after it — which invalidates exactly the
+                            // diff-two-captures workflow this tool exists for.
+                            if (chunk == null) os.write(ByteArray(want))
+                            else {
+                                os.write(chunk, 0, minOf(chunk.size, want))
+                                if (chunk.size < want) os.write(ByteArray(want - chunk.size))
+                            }
                             o += want; got += want
                             if ((o % 16384) == 0) status = "capturing… ${got * 100 / total}%"
                         }

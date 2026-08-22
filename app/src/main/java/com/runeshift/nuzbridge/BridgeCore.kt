@@ -45,7 +45,7 @@ object BridgeCore {
     @Volatile var lastFailure: String = "—"
     @Volatile var rawLines: List<String> = emptyList()
 
-    var server: WsServer? = null
+    @Volatile var server: WsServer? = null
     // High-fidelity producer: RetroArch RAM reads (exact species/HP/route).
     // Runs alongside or instead of OCR; the tracker treats both identically.
     @Volatile var memoryProducer: MemoryProducer? = null
@@ -58,6 +58,18 @@ object BridgeCore {
     // a bridge that reported "unbound" while the cart was something else.
     @Volatile var memoryGameKey: String? = null
 
+    // Producer lifecycle is @Synchronized throughout. It is reachable from four
+    // threads at once — the producer's own detection callback, the WebSocket
+    // config handler, the UI spinner/toggle, and the accessibility watchdog —
+    // and the unguarded check-then-act let two racing callers each build a
+    // producer: the loser became unreachable but kept polling and broadcasting
+    // with its own profile forever. No stop path could ever see it again, and
+    // its heartbeats kept the watchdog convinced everything was healthy.
+    private fun loadMemoryProfile(ctx: Context, key: String): MemoryProfile =
+        MemoryProfile(JSONObject(
+            ctx.assets.open("memory/$key.json").bufferedReader().use { it.readText() }))
+
+    @Synchronized
     fun startMemoryProducer(ctx: Context): String? {
         val want = gameKey
         if (memoryProducer?.running == true && memoryGameKey == want) return null
@@ -68,8 +80,7 @@ object BridgeCore {
         // was toggled by hand. A game we cannot read is a reason to keep
         // reading the old one, not to stop reading anything.
         val next = try {
-            MemoryProfile(JSONObject(
-                ctx.assets.open("memory/$want.json").bufferedReader().use { it.readText() }))
+            loadMemoryProfile(ctx, want)
         } catch (e: Exception) {
             return "no memory profile for '$want' (${e.message ?: e.javaClass.simpleName})" +
                 (memoryGameKey?.let { " — still reading $it" } ?: "")
@@ -81,6 +92,7 @@ object BridgeCore {
             memoryGameKey = want
             p.start()
             ensureServer()
+            ensureWatchdog(ctx)
             null
         } catch (e: Exception) {
             memoryGameKey = null
@@ -88,6 +100,25 @@ object BridgeCore {
         }
     }
 
+    // Liveness watchdog that does NOT depend on the accessibility service. The
+    // memory bridge never required accessibility, so for RAM-only users the
+    // entire lastProducerTickAt mechanism had no consumer: the sole
+    // ensureMemoryAlive call site was the accessibility tick, and any producer
+    // death was permanent until the switch was toggled by hand — the original
+    // reported symptom. Daemon thread, checks are no-ops while healthy.
+    private var watchdog: Thread? = null
+    @Synchronized private fun ensureWatchdog(ctx: Context) {
+        if (watchdog?.isAlive == true) return
+        val app = ctx.applicationContext
+        watchdog = Thread({
+            while (true) {
+                try { Thread.sleep(4000) } catch (e: InterruptedException) { return@Thread }
+                if (memoryProducer != null) runCatching { ensureMemoryAlive(app) }
+            }
+        }, "nuz-watchdog").apply { isDaemon = true; start() }
+    }
+
+    @Synchronized
     fun stopMemoryProducer() {
         memoryProducer?.stop()
         memoryProducer = null
@@ -130,6 +161,7 @@ object BridgeCore {
      * Re-arm the producer against the current gameKey. Called after the tracker
      * pushes a new game: a running producer must be rebuilt, not left alone.
      */
+    @Synchronized
     private fun reloadMemoryProducerForGame() {
         if (memoryProducer?.running != true || memoryGameKey == gameKey) return
         val ctx = appContext ?: return
@@ -147,6 +179,7 @@ object BridgeCore {
      *
      * Cheap and idempotent -- call it from anywhere that notices the feed is quiet.
      */
+    @Synchronized
     fun ensureMemoryAlive(ctx: Context, quietMs: Long = 8000L): Boolean {
         val p = memoryProducer ?: return false
         val now = System.currentTimeMillis()
@@ -162,12 +195,36 @@ object BridgeCore {
         // reported "silent for 25s, restarted" and nothing else, which is the diagnosis
         // missing exactly the part that matters.
         val cause = p.lastError.takeIf { it.isNotBlank() && it != "-" && it != "—" }
+        // Restart the profile that was RUNNING (memoryGameKey), not whatever gameKey has
+        // drifted to since — a watchdog fire is a lifecycle event, not a profile switch.
+        // And build the replacement BEFORE tearing anything down: the old shape here was
+        // stop-then-start, so a gameKey with no loadable profile (tracker pushed
+        // 'shining_pearl' after a run was deleted) left memoryProducer null and every
+        // later watchdog call bailing at the top — a permanent death caused by the
+        // recovery path itself.
+        val want = memoryGameKey ?: gameKey
+        val next = try {
+            loadMemoryProfile(ctx, want)
+        } catch (e: Exception) {
+            lastFailure = "watchdog: no memory profile for '$want' (${e.message ?: e.javaClass.simpleName})"
+            notifyChanged()
+            return false
+        }
         stopMemoryProducer()
-        val err = startMemoryProducer(ctx)
-        lastFailure = err ?: ("memory producer stopped after ${quiet / 1000}s - restarted" +
-            (cause?.let { " (last error: $it)" } ?: " (no error recorded)"))
-        notifyChanged()
-        return true
+        return try {
+            val np = MemoryProducer(next)
+            memoryProducer = np
+            memoryGameKey = want
+            np.start()
+            lastFailure = "memory producer stopped after ${quiet / 1000}s - restarted" +
+                (cause?.let { " (last error: $it)" } ?: " (no error recorded)")
+            notifyChanged()
+            true
+        } catch (e: Exception) {
+            lastFailure = "watchdog restart failed for '$want' (${e.message ?: e.javaClass.simpleName})"
+            notifyChanged()
+            false
+        }
     }
 
     fun addListener(fn: () -> Unit) { listeners.add(fn) }
@@ -293,17 +350,21 @@ object BridgeCore {
     /** Where the socket is actually bound, for the UI to show. */
     @Volatile var boundHost: String = "-"
 
+    @Synchronized
     fun ensureServer() {
         if (server != null) return
         val host = if (networkExposed) "0.0.0.0" else "127.0.0.1"
         // A failed bind used to be silent: the toggle flipped, nothing listened,
-        // and the UI still looked healthy. Record it instead.
+        // and the UI still looked healthy. Record it instead. NOTE the catch
+        // below cannot see a failed BIND — Java-WebSocket's start() only spawns
+        // the selector thread, and the actual bind happens there, surfacing as
+        // onError(null, ex) → onServerFatal below. The catch covers construction.
         try {
             val s = WsServer(WS_PORT, host) { lastState }
             s.start()
             server = s
             boundHost = host
-            if (lastFailure.startsWith("bind")) lastFailure = "-"
+            if (lastFailure.startsWith("bind") || lastFailure.startsWith("server:")) lastFailure = "-"
         } catch (e: Exception) {
             server = null
             boundHost = "-"
@@ -312,6 +373,29 @@ object BridgeCore {
         notifyChanged()
     }
 
+    /**
+     * A fatal server-level failure (WsServer.onError with conn == null — most
+     * importantly a failed bind, which happens on the server's own thread where
+     * ensureServer's try/catch can never see it). Before this, `server` kept
+     * holding the dead instance: the UI showed the intended host, ensureServer
+     * bailed on its null-check forever, and nothing was actually listening.
+     */
+    fun onServerFatal(who: WsServer, ex: Exception) {
+        // Runs on the SERVER's own thread. Never call stop() here (self-join) and
+        // never take the BridgeCore lock (stopServer joins this thread while
+        // holding it — bounded by its timeout, but no reason to collide). The
+        // library has already torn itself down; just drop the dead reference,
+        // and only if it is still the current one — a late fatal from an old
+        // instance must not null out a healthy replacement.
+        if (server === who) {
+            server = null
+            boundHost = "-"
+        }
+        lastFailure = "server: ${ex.message ?: ex.javaClass.simpleName}"
+        notifyChanged()
+    }
+
+    @Synchronized
     fun stopServer() {
         runCatching { server?.stop(500) }
         server = null

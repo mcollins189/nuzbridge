@@ -48,7 +48,9 @@ class WsServer(port: Int, host: String = "127.0.0.1", private val currentState: 
         // empty party, and the tracker had nothing to switch to and nothing to report.
         // The content and crc32 go with it so an unmatched ROM can actually be identified
         // — that is the one piece of information needed to add it to the fingerprints.
-        if (GameDetect.lastGame != null || GameDetect.lastContent != null) {
+        // "—" is the never-detected placeholder, not a cartridge: suppress the
+        // detect frame until detection has actually answered at least once.
+        if (GameDetect.lastGame != null || GameDetect.lastContent != "—") {
             val d = JSONObject()
             d.put("type", "detect")
             d.put("game", GameDetect.lastGame)
@@ -71,8 +73,11 @@ class WsServer(port: Int, host: String = "127.0.0.1", private val currentState: 
     override fun onMessage(conn: WebSocket, message: String) {
         runCatching {
             val o = JSONObject(message)
-            // Probe: read emulator memory and hand it back. Only answered when
-            // network exposure is on — otherwise the only client is this device.
+            // Probe: read emulator memory and hand it back, for the desktop
+            // relay-probe workflow. Answered for ANY connected client — reach
+            // is controlled by the bind address (loopback unless "Allow network
+            // access" is on), not by a check here. An earlier comment claimed a
+            // network-exposure gate that never existed in code.
             if (o.optString("type") == "probe") {
                 val addr = o.optString("addr").removePrefix("0x").toLongOrNull(16)
                 val len = o.optInt("len", 0)
@@ -97,7 +102,14 @@ class WsServer(port: Int, host: String = "127.0.0.1", private val currentState: 
         }
     }
 
-    override fun onError(conn: WebSocket?, ex: Exception) {}
+    // conn == null means a SERVER-level failure — most importantly a failed
+    // bind, which happens on this server's own thread where the caller's
+    // try/catch around start() can never see it. Swallowing it left a dead
+    // server looking healthy and never retried. Per-connection errors (conn
+    // != null) are still ignored: the library closes that socket itself.
+    override fun onError(conn: WebSocket?, ex: Exception) {
+        if (conn == null) BridgeCore.onServerFatal(this, ex)
+    }
 
     /**
      * Tell the tracker which cartridge is actually running. The tracker follows

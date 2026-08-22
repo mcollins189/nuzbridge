@@ -24,6 +24,11 @@ class MemoryProducer(private val profile: MemoryProfile) {
 
     @Volatile var running = false
         private set
+    /** True while the producer is deliberately paused on a wrong/unknown
+     *  cartridge. The OCR fallback checks this: freshness freezes during a
+     *  pause exactly like a death, and OCR stepping in would read the new
+     *  cartridge's screen against the old game's token lists. */
+    @Volatile var pausedMismatch = false
     @Volatile var lastError: String = "—"
     @Volatile var lastStateSummary: String = "—"
     @Volatile var readsOk = 0L
@@ -53,6 +58,13 @@ class MemoryProducer(private val profile: MemoryProfile) {
 
     fun stop() {
         running = false
+        // Interrupt so a stop takes effect NOW, not after the in-flight poll:
+        // `running` is only tested at the top of the loop, so a producer stopped
+        // mid-pollOnce used to finish the poll and broadcast one more full frame
+        // decoded through the OLD profile — arriving after the new producer's
+        // first frame on a game switch. pollOnce also re-checks `running` before
+        // it broadcasts, for the paths an interrupt cannot reach mid-receive.
+        thread?.interrupt()
         thread = null
     }
 
@@ -91,7 +103,14 @@ class MemoryProducer(private val profile: MemoryProfile) {
             if (d == profile.game) { confirmedContent = GameDetect.lastContent; return false }
             return true
         }
-        val now = GameDetect.lastContent ?: return false          // nothing detected at all yet
+        // "—" is the never-answered placeholder, not a cartridge. lastContent is
+        // non-nullable, so the old `?: return false` guard was DEAD CODE and the
+        // placeholder walked straight into confirmedContent: start the producer
+        // before RetroArch answers once, then load any hand-picked ROM that is
+        // not in the fingerprints, and `now != was` compared a real content name
+        // against "—" — pausing the producer forever for a perfectly valid game.
+        val now = GameDetect.lastContent
+        if (now == "—") return false                               // nothing detected at all yet
         val was = confirmedContent
         if (was == null) { confirmedContent = now; return false }  // never recognised — user's choice
         return now != was                                          // swapped into something unknown
@@ -150,9 +169,21 @@ class MemoryProducer(private val profile: MemoryProfile) {
                         "Unrecognised cartridge (${GameDetect.lastContent}) — paused rather than " +
                         "read it through ${profile.game}'s addresses."
                     lastStateSummary = "[${profile.game}] paused — wrong game loaded"
+                    // "Emit nothing" has to cover the replay path too: WsServer
+                    // hands lastState to every NEW connection, so a tracker that
+                    // reconnected during this pause received the PREVIOUS
+                    // cartridge's full roster right after the detect frame.
+                    // And flag the pause so the OCR fallback holds off — it keys
+                    // on freshness, which a pause freezes exactly like a death,
+                    // and OCR reading the new cartridge's screen against the old
+                    // game's token lists was a wrong encounter through the back
+                    // door during the exact window this branch exists to close.
+                    pausedMismatch = true
+                    BridgeCore.lastState = null
                     Thread.sleep(1000L)
                     continue
                 }
+                pausedMismatch = false
                 try { pollOnce(sock, addr) } catch (e: Throwable) {
                     readsFailed++
                     lastError = "poll: ${e.message ?: e.javaClass.simpleName}"
@@ -211,14 +242,24 @@ class MemoryProducer(private val profile: MemoryProfile) {
     private fun detectGame(sock: DatagramSocket, addr: InetAddress) {
         val ctx = BridgeCore.appContext ?: return
         val out = "GET_STATUS".toByteArray()
-        val buf = ByteArray(512)
-        val pkt = DatagramPacket(buf, buf.size)
-        val reply = try {
+        // Same correlation rule as read(): the socket is shared, so a late
+        // READ_CORE_MEMORY reply can be sitting in the buffer — discard strays
+        // until the GET_STATUS answer arrives instead of silently skipping
+        // detection (and leaving that memory reply to poison the next read).
+        var reply: String? = null
+        try {
             sock.send(DatagramPacket(out, out.size, addr, 55355))
-            sock.receive(pkt)
-            String(pkt.data, 0, pkt.length)
+            var attempts = 0
+            while (attempts < 4) {
+                attempts++
+                val buf = ByteArray(512)
+                val pkt = DatagramPacket(buf, buf.size)
+                sock.receive(pkt)
+                val s = String(pkt.data, 0, pkt.length)
+                if (s.startsWith("GET_STATUS")) { reply = s; break }
+            }
         } catch (e: Exception) { return }   // detection is best-effort, never fatal
-        if (!reply.startsWith("GET_STATUS")) return
+        if (reply == null) return
         val r = GameDetect.parse(ctx, reply)
         val changed = GameDetect.record(r)
         // A recognised game that is not the one we are decoding means every
@@ -233,10 +274,9 @@ class MemoryProducer(private val profile: MemoryProfile) {
     }
 
     private fun read(sock: DatagramSocket, addr: InetAddress, at: Long, len: Int): ByteArray? {
-        val cmd = "READ_CORE_MEMORY ${at.toString(16)} $len"
+        val wantAddr = at.toString(16)
+        val cmd = "READ_CORE_MEMORY $wantAddr $len"
         val out = cmd.toByteArray()
-        val buf = ByteArray(16 + len * 3 + 32)
-        val pkt = DatagramPacket(buf, buf.size)
         // The SEND has to be inside the try as well. If RetroArch is momentarily
         // gone — which is exactly what a savestate load looks like — the socket
         // takes an ICMP port-unreachable and Java then throws
@@ -246,13 +286,34 @@ class MemoryProducer(private val profile: MemoryProfile) {
         // and only creating a new socket (toggling the memory switch) revived it.
         return try {
             sock.send(DatagramPacket(out, out.size, addr, 55355))
-            sock.receive(pkt)
-            val parts = String(pkt.data, 0, pkt.length).trim().split(" ")
-            if (parts.size < 3 || parts[0] != "READ_CORE_MEMORY" || parts[2] == "-1") { readsFailed++; null }
-            else {
-                readsOk++
-                ByteArray(parts.size - 2) { i -> parts[i + 2].toInt(16).toByte() }
+            // A reply only counts if it echoes the REQUESTED address. After a
+            // timeout the late reply stays queued in the OS receive buffer, and
+            // accepting arrival order meant every subsequent request consumed
+            // the PREVIOUS request's reply — a permanent off-by-one that decodes
+            // enemy-party bytes as the player's party and box N into slot N-1,
+            // all looking completely native, while readsOk kept climbing so the
+            // dead-poll socket reset never fired. Drain mismatches instead.
+            var result: ByteArray? = null
+            var attempts = 0
+            while (attempts < 4) {
+                attempts++
+                val buf = ByteArray(16 + len * 3 + 32)
+                val pkt = DatagramPacket(buf, buf.size)
+                sock.receive(pkt)
+                val parts = String(pkt.data, 0, pkt.length).trim().split(" ")
+                if (parts.size < 2 || parts[0] != "READ_CORE_MEMORY") continue      // e.g. a stray GET_STATUS reply
+                if (!parts[1].removePrefix("0x").equals(wantAddr, ignoreCase = true)) continue  // someone else's reply
+                result = if (parts.size < 3 || parts[2] == "-1") null
+                         else ByteArray(parts.size - 2) { i -> parts[i + 2].toInt(16).toByte() }
+                break
             }
+            // A short reply is a FAILED read, not a partial success. Callers
+            // index into the requested length (u32 at +0, battlerIndexes[6..7]),
+            // and a clamped reply made that an ArrayIndexOutOfBounds that threw
+            // away the whole poll — while readsOk from earlier reads kept the
+            // socket-reset recovery from ever firing.
+            if (result != null && result.size < len) result = null
+            if (result != null) { readsOk++; result } else { readsFailed++; null }
         } catch (e: SocketTimeoutException) {
             readsFailed++
             lastError = "RetroArch not responding on :55355 — enable Network Commands"
@@ -594,6 +655,13 @@ class MemoryProducer(private val profile: MemoryProfile) {
 
     private fun pollOnce(sock: DatagramSocket, addr: InetAddress) {
         val a = profile.addrs
+        // If NOTHING below succeeds, this poll must leave no trace: no freshness
+        // stamp and no frame. read() never throws, so a closed/suspended
+        // RetroArch used to let pollOnce run to completion on nulls — stamping
+        // lastMemoryPollAt as if healthy and emitting an empty party that looked
+        // like a live "your party is empty" statement. That both suppressed the
+        // OCR fallback (it keys on freshness) and told the tracker a falsehood.
+        val okAtPollStart = readsOk
         // Route via current map header's regionMapSectionId.
         var route: String? = null
         // The exact map, not just its region name. gMapHeader gives a regionMapSectionId,
@@ -1019,6 +1087,8 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 lastError = "—"
             }
         }
+        // Freshness means "data actually came back this poll", not "the loop ran".
+        if (readsOk == okAtPollStart) return
         BridgeCore.lastMemoryPollAt = System.currentTimeMillis()
         val state = JSONObject()
         state.put("type", "state")
@@ -1054,8 +1124,18 @@ class MemoryProducer(private val profile: MemoryProfile) {
             // changes wholesale while the cache still describes the old one.
             val fresh = System.currentTimeMillis() - 60000
             val boxArr = JSONArray()
-            for (i in boxContents.indices) if (boxSweptAt[i] > fresh) for (m in boxContents[i]) boxArr.put(m)
-            if (boxArr.length() > 0) state.put("box", boxArr)
+            var anyFresh = false
+            for (i in boxContents.indices) if (boxSweptAt[i] > fresh) {
+                anyFresh = true
+                for (m in boxContents[i]) boxArr.put(m)
+            }
+            // Emit the key whenever ANY box was confirmed recently — including an
+            // EMPTY array. Omitting the key on empty conflated "the PC is
+            // genuinely empty" with "the sweep stalled / all boxes went stale",
+            // and since an absent key means "no change" to the tracker, emptying
+            // the PC left it holding the last box list forever. Absent now means
+            // exactly "boxes unknown".
+            if (anyFresh) state.put("box", boxArr)
         }
         if (route != null) state.put("route", route)
         // Which of the region's maps this actually is. Sent alongside the name so a
@@ -1090,6 +1170,10 @@ class MemoryProducer(private val profile: MemoryProfile) {
         // hundred bytes every couple of seconds.
         val now = System.currentTimeMillis()
         val heartbeat = now - lastBroadcastAt >= HEARTBEAT_MS
+        // Re-check running at the last moment: a producer stopped mid-poll (game
+        // switch) must not publish a frame decoded through the profile that was
+        // just retired — it would land AFTER the replacement's first frame.
+        if (!running) return
         if (cmp != lastJson || heartbeat) {
             lastBroadcastAt = now
             lastJson = cmp
