@@ -26,8 +26,10 @@ object MemoryRelay {
         try {
             val out = ByteArray(len)
             var got = 0
-            // RetroArch truncates large replies, so chunk. 256 keeps each reply
-            // inside a single datagram with room to spare.
+            // Chunked reads. 600/800-byte reads are confirmed working against
+            // this setup's RetroArch (MemoryProducer issues them live); 256 is
+            // kept here as a conservative margin for the relay path, not a
+            // protocol limit.
             while (got < len) {
                 val want = minOf(256, len - got)
                 val chunk = readOnce(sock, at + got, want) ?: return null
@@ -42,15 +44,30 @@ object MemoryRelay {
     }
 
     private fun readOnce(sock: DatagramSocket, at: Long, len: Int): ByteArray? {
-        val cmd = "READ_CORE_MEMORY ${at.toString(16)} $len".toByteArray()
-        val buf = ByteArray(16 + len * 3 + 64)
-        val pkt = DatagramPacket(buf, buf.size)
+        val wantAddr = at.toString(16)
+        val cmd = "READ_CORE_MEMORY $wantAddr $len".toByteArray()
         return try {
             sock.send(DatagramPacket(cmd, cmd.size, InetAddress.getByName("127.0.0.1"), 55355))
-            sock.receive(pkt)
-            val parts = String(pkt.data, 0, pkt.length).trim().split(" ")
-            if (parts.size < 3 || parts[2] == "-1") null
-            else ByteArray(parts.size - 2) { i -> parts[i + 2].toInt(16).toByte() }
+            // Same one-late-reply desync the producer had (v1.23): after a
+            // timeout the stale reply stays queued in the OS buffer, and
+            // accepting arrival order answers a probe with the PREVIOUS
+            // request's bytes — which is how a wrong address gets pinned into
+            // a profile. Accept only a reply that echoes this request's
+            // address AND exact length; drain everything else.
+            var attempts = 0
+            while (attempts < 4) {
+                attempts++
+                val buf = ByteArray(16 + len * 3 + 64)
+                val pkt = DatagramPacket(buf, buf.size)
+                sock.receive(pkt)
+                val parts = String(pkt.data, 0, pkt.length).trim().split(" ")
+                if (parts.size < 3 || parts[0] != "READ_CORE_MEMORY") continue
+                if (!parts[1].removePrefix("0x").equals(wantAddr, ignoreCase = true)) continue
+                if (parts[2] == "-1") return null       // correlated error reply
+                if (parts.size - 2 != len) continue     // stale differently-sized reply
+                return ByteArray(len) { i -> parts[i + 2].toInt(16).toByte() }
+            }
+            null
         } catch (e: Exception) { null }
     }
 

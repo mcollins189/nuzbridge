@@ -45,8 +45,16 @@ class MainActivity : Activity() {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, games)
             val idx = games.indexOf(prefs().getString("game", "unbound"))
             if (idx >= 0) setSelection(idx)
+            // A tracker-pushed game with no bundled asset left idx -1, the
+            // Spinner defaulted to position 0, and Android's async initial
+            // onItemSelected then fired for position 0 — silently re-pointing
+            // the bridge (and the persisted pref) at the alphabetically-first
+            // game. Swallow that one initial callback when the saved game is
+            // not in the list.
+            var suppressInitial = idx < 0
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                    if (suppressInitial) { suppressInitial = false; return }
                     val key = games[pos]
                     prefs().edit().putString("game", key).apply()
                     runCatching { BridgeCore.loadProfile(this@MainActivity, key) }

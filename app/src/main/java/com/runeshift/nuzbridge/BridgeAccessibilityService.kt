@@ -54,8 +54,13 @@ class BridgeAccessibilityService : AccessibilityService() {
             // quietMs widened to 30s, so a stalling-but-ticking producer could
             // cede route/encounter to OCR for up to 25s. A ticking producer is
             // not a dead feed (liveness vs freshness), and if RetroArch is gone
-            // there is nothing on screen for OCR to read anyway.
-            val memoryAlive = BridgeCore.memoryProducer != null && System.currentTimeMillis() - BridgeCore.lastProducerTickAt < 5000
+            // there is nothing on screen for OCR to read anyway. But a producer
+            // that ticks and has NEVER landed a read (Network Commands off,
+            // wrong port, all-minus-one profile) must yield to OCR — pre-1.25
+            // OCR took over in 5s and that was the correct behaviour for the
+            // blind case; deferral is only right while the producer has
+            // actually produced within the watchdog's own 30s window.
+            val memoryAlive = BridgeCore.memoryProducer != null && System.currentTimeMillis() - BridgeCore.lastProducerTickAt < 5000 && System.currentTimeMillis() - BridgeCore.lastMemoryPollAt < 30000
             if (BridgeCore.scanning && !busy && !memoryFresh && !pausedMismatch && !memoryAlive) scanOnce()
             handler.postDelayed(this, BridgeCore.SCAN_INTERVAL_MS)
         }

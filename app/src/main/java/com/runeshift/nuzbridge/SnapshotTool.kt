@@ -42,6 +42,10 @@ object SnapshotTool {
                 val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
                 val safe = label.replace(Regex("[^A-Za-z0-9-]+"), "_").take(24)
                 val out = File(dir, "snap-$stamp${if (safe.isNotEmpty()) "-$safe" else ""}.bin")
+                // Zero-filled chunks used to be silent, so a corrupt capture
+                // was indistinguishable from a good one. Count them and say
+                // so in the final status instead.
+                var failedChunks = 0
                 out.outputStream().buffered().use { os ->
                     os.write("NUZSNAP1".toByteArray())
                     var total = 0; var got = 0
@@ -64,7 +68,7 @@ object SnapshotTool {
                             // while writing fewer bytes, silently shifting every
                             // byte after it — which invalidates exactly the
                             // diff-two-captures workflow this tool exists for.
-                            if (chunk == null) os.write(ByteArray(want))
+                            if (chunk == null) { failedChunks++; os.write(ByteArray(want)) }
                             else {
                                 os.write(chunk, 0, minOf(chunk.size, want))
                                 if (chunk.size < want) os.write(ByteArray(want - chunk.size))
@@ -78,7 +82,8 @@ object SnapshotTool {
                 // prune to the newest KEEP
                 dir.listFiles { f -> f.name.startsWith("snap-") }
                     ?.sortedByDescending { it.name }?.drop(KEEP)?.forEach { it.delete() }
-                status = "saved ${out.name} (${out.length() / 1024}KB)"
+                status = "saved ${out.name} (${out.length() / 1024}KB" +
+                    (if (failedChunks > 0) ", $failedChunks chunks zero-filled" else "") + ")"
             } catch (e: Throwable) {
                 status = "failed: ${e.message ?: e.javaClass.simpleName}"
             } finally {
@@ -89,15 +94,30 @@ object SnapshotTool {
     }
 
     private fun readMem(sock: DatagramSocket, addr: InetAddress, at: Long, len: Int): ByteArray? {
-        val cmd = "READ_CORE_MEMORY ${at.toString(16)} $len".toByteArray()
-        sock.send(DatagramPacket(cmd, cmd.size, addr, 55355))
-        val buf = ByteArray(16 + len * 3 + 64)
-        val pkt = DatagramPacket(buf, buf.size)
+        val wantAddr = at.toString(16)
+        val cmd = "READ_CORE_MEMORY $wantAddr $len".toByteArray()
         return try {
-            sock.receive(pkt)
-            val parts = String(pkt.data, 0, pkt.length).trim().split(" ")
-            if (parts.size < 3 || parts[2] == "-1") null
-            else ByteArray(parts.size - 2) { i -> parts[i + 2].toInt(16).toByte() }
+            sock.send(DatagramPacket(cmd, cmd.size, addr, 55355))
+            // Same one-late-reply desync the producer had (v1.23): after a
+            // timeout the stale reply stays queued in the OS buffer, and
+            // accepting arrival order silently SHIFTS the capture by one
+            // request — which is how a wrong address gets pinned into a
+            // profile off a diffed pair. Accept only a reply that echoes this
+            // request's address AND exact length; drain everything else.
+            var attempts = 0
+            while (attempts < 4) {
+                attempts++
+                val buf = ByteArray(16 + len * 3 + 64)
+                val pkt = DatagramPacket(buf, buf.size)
+                sock.receive(pkt)
+                val parts = String(pkt.data, 0, pkt.length).trim().split(" ")
+                if (parts.size < 3 || parts[0] != "READ_CORE_MEMORY") continue
+                if (!parts[1].removePrefix("0x").equals(wantAddr, ignoreCase = true)) continue
+                if (parts[2] == "-1") return null       // correlated error reply
+                if (parts.size - 2 != len) continue     // stale differently-sized reply
+                return ByteArray(len) { i -> parts[i + 2].toInt(16).toByte() }
+            }
+            null
         } catch (e: Exception) { null }
     }
 }

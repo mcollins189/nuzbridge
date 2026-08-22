@@ -235,6 +235,12 @@ object BridgeCore {
             // Seed liveness so a second caller arriving inside thread-start
             // latency does not restart the just-started producer.
             lastProducerTickAt = now
+            // A restarted producer implies the server is wanted — the
+            // accessibility teardown path can clear serverWanted while a
+            // dead-but-present producer exists, after which the watchdog
+            // resurrected the producer but not the server, and it broadcast
+            // into null forever.
+            ensureServer()
             lastFailure = "memory producer stopped after ${quiet / 1000}s - restarted" +
                 (cause?.let { " (last error: $it)" } ?: " (no error recorded)")
             notifyChanged()

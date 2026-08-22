@@ -116,11 +116,18 @@ class MemoryProducer(private val profile: MemoryProfile) {
     }
 
     private fun loop() {
-        var sock = DatagramSocket().apply { soTimeout = 800 }
-        val addr = InetAddress.getByName("127.0.0.1")
+        // Socket creation must live INSIDE the try whose finally guarantees
+        // `running = false`. If DatagramSocket() itself threw (fd exhaustion),
+        // the thread died with running=true — the exact zombie the finally
+        // exists to prevent — and the tick-seed in ensureMemoryAlive then
+        // bought the corpse 30s of apparent liveness per restart.
+        var sock: DatagramSocket? = null
         var deadPolls = 0
         var ticks = 0L
         try {
+            var s = DatagramSocket().apply { soTimeout = 800 }
+            sock = s
+            val addr = InetAddress.getByName("127.0.0.1")
             while (running) {
               // Nothing inside one iteration is worth the whole producer. A Throwable that
               // escaped here killed the thread while `running` stayed true, which made a
@@ -156,7 +163,7 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 // changing cartridges and anything noticing. One GET_STATUS packet is
                 // nothing next to the ~11 memory reads each poll already sends.
                 if (ticks == 0L || ticks % 3L == 0L || deadPolls > 0) {
-                    try { detectGame(sock, addr) } catch (e: Throwable) { /* best-effort */ }
+                    try { detectGame(s, addr) } catch (e: Throwable) { /* best-effort */ }
                 }
                 ticks++
                 if (mismatched()) {
@@ -187,7 +194,7 @@ class MemoryProducer(private val profile: MemoryProfile) {
                     continue
                 }
                 pausedMismatch = false
-                try { pollOnce(sock, addr) } catch (e: Throwable) {
+                try { pollOnce(s, addr) } catch (e: Throwable) {
                     readsFailed++
                     lastError = "poll: ${e.message ?: e.javaClass.simpleName}"
                 }
@@ -210,8 +217,20 @@ class MemoryProducer(private val profile: MemoryProfile) {
                         lastError.startsWith("read: ") || lastError.startsWith("poll: ") ||
                         lastError.startsWith("reply correlation lost") ||
                         lastError.startsWith("socket reset") ||
+                        // A pause can end WITHOUT a producer swap (a garbled
+                        // GET_STATUS reply flips lastContent for one poll, then
+                        // detection recovers) — the pause message then stuck
+                        // forever while data flowed, and poisoned
+                        // ensureMemoryAlive's restart-cause capture.
+                        lastError.startsWith("Wrong profile") ||
+                        lastError.startsWith("Unrecognised cartridge") ||
                         lastError.startsWith("reads return -1")) {
                         lastError = "—"
+                        // The notify inside pollOnce fires BEFORE this clear
+                        // runs; without a follow-up notify the UI keeps showing
+                        // a diagnostic that the very same iteration already
+                        // retired.
+                        BridgeCore.notifyChanged()
                     }
                 } else {
                     deadPolls++
@@ -220,8 +239,9 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 // itself is poisoned and replace it. This is precisely what
                 // toggling the memory switch by hand was doing.
                 if (deadPolls >= 3) {
-                    runCatching { sock.close() }
-                    sock = try { DatagramSocket().apply { soTimeout = 800 } } catch (e: Exception) { sock }
+                    runCatching { s.close() }
+                    s = try { DatagramSocket().apply { soTimeout = 800 } } catch (e: Exception) { s }
+                    sock = s
                     deadPolls = 0
                     lastError = "socket reset — reconnecting to RetroArch"
                 }
@@ -242,7 +262,7 @@ class MemoryProducer(private val profile: MemoryProfile) {
             // ALWAYS, on every exit path. This is the flag every restart path tests, so
             // leaving it true after the thread is gone is what made the failure permanent.
             running = false
-            runCatching { sock.close() }
+            runCatching { sock?.close() }
         }
     }
 
@@ -741,6 +761,14 @@ class MemoryProducer(private val profile: MemoryProfile) {
         val countRead = read(sock, addr, a.partyCount, 1)
         val count = countRead?.let { it[0].toInt() and 0xFF } ?: 0
         val playerSlots = readParty(sock, addr, a.playerParty, minOf(count, 6))
+        // Every slot read must have landed before the party below may be emitted
+        // as authoritative. A 6-mon party with slots 3-5 dropped used to emit a
+        // 3-mon party — the mirroring side flags the missing three
+        // out-of-party, and the compacted array desyncs the
+        // gBattlerPartyIndexes-based allies/choosing focus. (count == 0 yields
+        // an empty playerSlots list, for which none{} is true, so a genuinely
+        // empty party still emits.)
+        val allSlotsRead = playerSlots.none { it == null }
         for (b in playerSlots) decodeMon(b)?.let { party.put(it) }
         // Encounter, gated by the exact in-battle flag.
         var encounter: JSONObject? = null
@@ -1177,11 +1205,11 @@ class MemoryProducer(private val profile: MemoryProfile) {
         surfing?.let { state.put("surfing", it) }
         if (timeOfDay != null) state.put("timeOfDay", timeOfDay)
         // Party is OMITTED when unknown, matching the route/box convention. A
-        // dropped partyCount packet (or a count>0 whose every slot read failed)
-        // used to ship "party": [] as a live statement that the player has no
-        // Pokémon — the same class of falsehood the box path was hardened
-        // against twice; absent means unknown.
-        if (countRead != null && (count == 0 || party.length() > 0)) state.put("party", party)
+        // dropped partyCount packet (or a count>0 with ANY slot read dropped)
+        // used to ship a wrong party as a live statement — the same class of
+        // falsehood the box path was hardened against twice; absent means
+        // unknown.
+        if (countRead != null && allSlotsRead) state.put("party", party)
         // Explicit null means "battle over, clear the banner"; a dropped
         // enemy-party read mid-battle is not that — omit the key (no change)
         // rather than clearing.
