@@ -179,6 +179,22 @@
    "match": [
     "tourmaline"
    ]
+  },
+  "amethyst": {
+   "crc32": [
+    "88501ADA"
+   ],
+   "match": [
+    "amethyst"
+   ]
+  },
+  "dreamstone": {
+   "crc32": [
+    "DC343B57"
+   ],
+   "match": [
+    "dreamstone"
+   ]
   }
  }
 }
