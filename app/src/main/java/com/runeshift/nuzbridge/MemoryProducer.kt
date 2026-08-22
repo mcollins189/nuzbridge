@@ -453,6 +453,9 @@ class MemoryProducer(private val profile: MemoryProfile) {
         if (profile.expWidth == 2) exp = exp and 0xFFFF
         val o = JSONObject()
         o.put("species", profile.speciesById[species] ?: "#$species")
+        // Personality value: unique per INDIVIDUAL — lets the tracker tell a
+        // caught duplicate of a known species from the mon it already has.
+        o.put("pid", personality)
         // Nickname: 10 bytes at +8, in the Gen-3 character encoding. Worth
         // having for its own sake, but it also makes roster matching far more
         // reliable than species alone — species collides across duplicates and
@@ -647,6 +650,10 @@ class MemoryProducer(private val profile: MemoryProfile) {
         if (species !in 1..2999) return null
         val o = JSONObject()
         o.put("species", profile.speciesById[species] ?: "#" + species)
+        // Personality value: unique per INDIVIDUAL, which is what lets the
+        // tracker tell a caught duplicate of a known species from the mon it
+        // already has — species/nickname heuristics cannot.
+        o.put("pid", pers)
         decodeG3(b, off + 8, 10)?.let { if (it.isNotEmpty()) o.put("nickname", it) }
         val exp = if (encrypted) (u32(b, gOff + 4) xor key).toInt() else u32(b, off + if (flat) 36 else 32).toInt()
         val growth = profile.growthById[species]
