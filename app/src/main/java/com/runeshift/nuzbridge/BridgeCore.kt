@@ -114,6 +114,11 @@ object BridgeCore {
             while (true) {
                 try { Thread.sleep(4000) } catch (e: InterruptedException) { return@Thread }
                 if (memoryProducer != null) runCatching { ensureMemoryAlive(app) }
+                // Server retry on the same tick: after a fatal (onServerFatal) or a
+                // service teardown, nothing ever re-created the server; the producer
+                // polled into null forever. ensureServer is @Synchronized and returns
+                // immediately when server != null, so this is a no-op while healthy.
+                runCatching { ensureServer() }
             }
         }, "nuz-watchdog").apply { isDaemon = true; start() }
     }
@@ -178,9 +183,14 @@ object BridgeCore {
      * looping and holds a state we want held.
      *
      * Cheap and idempotent -- call it from anywhere that notices the feed is quiet.
+     *
+     * The window is generous on purpose: one poll iteration can legitimately exceed 8s
+     * when RetroArch is stalling (up to ~11 reads x 800ms timeouts, each read now up to
+     * 4 drain receives), so an 8s window let the watchdog kill a producer that was
+     * recovering by itself via its own deadPolls socket reset.
      */
     @Synchronized
-    fun ensureMemoryAlive(ctx: Context, quietMs: Long = 8000L): Boolean {
+    fun ensureMemoryAlive(ctx: Context, quietMs: Long = 30000L): Boolean {
         val p = memoryProducer ?: return false
         val now = System.currentTimeMillis()
         // A thread that is still ticking needs no restart, whatever it is doing. If it is
@@ -361,10 +371,15 @@ object BridgeCore {
         // onError(null, ex) → onServerFatal below. The catch covers construction.
         try {
             val s = WsServer(WS_PORT, host) { lastState }
-            s.start()
+            // Install BEFORE start(). Java-WebSocket binds on its own selector
+            // thread, so a fast bind failure could reach onServerFatal BEFORE
+            // `server = s` executed — the identity check `server === who` no-opped,
+            // the dead instance was installed anyway, and resetting lastFailure
+            // after start() erased the diagnostic onServerFatal had just written.
             server = s
             boundHost = host
             if (lastFailure.startsWith("bind") || lastFailure.startsWith("server:")) lastFailure = "-"
+            s.start()
         } catch (e: Exception) {
             server = null
             boundHost = "-"
@@ -399,6 +414,10 @@ object BridgeCore {
     fun stopServer() {
         runCatching { server?.stop(500) }
         server = null
+        // Clear the bound address too: a stale boundHost made setNetworkExposed's
+        // `boundHost == want` early-return refuse to rebind after a teardown, and
+        // the UI kept showing a listening address with nothing bound.
+        boundHost = "-"
     }
 
     // ── State emission ───────────────────────────────────────────────────────

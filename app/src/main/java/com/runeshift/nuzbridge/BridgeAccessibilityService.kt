@@ -97,12 +97,19 @@ class BridgeAccessibilityService : AccessibilityService() {
         // a user debugging the service does repeatedly.
         runCatching { screenshotExecutor.shutdown() }
         runCatching { recognizer.close() }
-        BridgeCore.stopServer()
+        // The WS server serves the memory feed too; tearing it down because the
+        // OCR service went away silenced a healthy producer. Only stop it when
+        // the memory producer is not running.
+        if (BridgeCore.memoryProducer?.running != true) BridgeCore.stopServer()
         BridgeCore.notifyChanged()
     }
 
     private fun scanOnce() {
         val profile = BridgeCore.profile ?: return
+        // Right after a cartridge switch the profile is reset to empty token
+        // lists; OCR output against empty lists can only emit encounter-clearing
+        // frames for a game it knows nothing about.
+        if (profile.species.isEmpty()) return
         if (parser == null || parserGame != profile.key) {
             parser = OcrParser(profile)
             parserGame = profile.key

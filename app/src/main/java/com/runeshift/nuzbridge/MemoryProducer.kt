@@ -58,12 +58,11 @@ class MemoryProducer(private val profile: MemoryProfile) {
 
     fun stop() {
         running = false
-        // Interrupt so a stop takes effect NOW, not after the in-flight poll:
-        // `running` is only tested at the top of the loop, so a producer stopped
-        // mid-pollOnce used to finish the poll and broadcast one more full frame
-        // decoded through the OLD profile — arriving after the new producer's
-        // first frame on a game switch. pollOnce also re-checks `running` before
-        // it broadcasts, for the paths an interrupt cannot reach mid-receive.
+        // Best-effort nudge only: Thread.interrupt() does NOT unblock
+        // DatagramSocket.receive (not an InterruptibleChannel) — the interrupt is
+        // only observed at Thread.sleep, so an in-flight poll may still run to
+        // completion. The real guarantee against a post-stop frame is the
+        // `if (!running) return` re-check before the broadcast in pollOnce.
         thread?.interrupt()
         thread = null
     }
@@ -179,7 +178,9 @@ class MemoryProducer(private val profile: MemoryProfile) {
                     // game's token lists was a wrong encounter through the back
                     // door during the exact window this branch exists to close.
                     pausedMismatch = true
-                    BridgeCore.lastState = null
+                    // A producer retired mid-pause must not null the REPLACEMENT's
+                    // published state — only a still-running instance owns it.
+                    if (running) BridgeCore.lastState = null
                     Thread.sleep(1000L)
                     continue
                 }
@@ -294,6 +295,7 @@ class MemoryProducer(private val profile: MemoryProfile) {
             // all looking completely native, while readsOk kept climbing so the
             // dead-poll socket reset never fired. Drain mismatches instead.
             var result: ByteArray? = null
+            var correlated = false
             var attempts = 0
             while (attempts < 4) {
                 attempts++
@@ -303,16 +305,21 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 val parts = String(pkt.data, 0, pkt.length).trim().split(" ")
                 if (parts.size < 2 || parts[0] != "READ_CORE_MEMORY") continue      // e.g. a stray GET_STATUS reply
                 if (!parts[1].removePrefix("0x").equals(wantAddr, ignoreCase = true)) continue  // someone else's reply
-                result = if (parts.size < 3 || parts[2] == "-1") null
-                         else ByteArray(parts.size - 2) { i -> parts[i + 2].toInt(16).toByte() }
+                // A "-1" error reply is still the answer to this request.
+                if (parts.size >= 3 && parts[2] == "-1") { correlated = true; break }
+                // Same address but different length identifies a STALE reply from
+                // an earlier differently-sized request at the same base
+                // (readParty's bulk read at `base` vs its per-slot fallback at
+                // `base`). Only the EXACT requested length is our answer; anything
+                // else is a stray to keep draining past.
+                if (parts.size - 2 != len) continue
+                correlated = true
+                result = ByteArray(len) { i -> parts[i + 2].toInt(16).toByte() }
                 break
             }
-            // A short reply is a FAILED read, not a partial success. Callers
-            // index into the requested length (u32 at +0, battlerIndexes[6..7]),
-            // and a clamped reply made that an ArrayIndexOutOfBounds that threw
-            // away the whole poll — while readsOk from earlier reads kept the
-            // socket-reset recovery from ever firing.
-            if (result != null && result.size < len) result = null
+            // All 4 drain attempts consumed without our reply: say so — the
+            // timeout path reports itself, and this one used to be silent.
+            if (!correlated) lastError = "reply correlation lost — draining stray packets"
             if (result != null) { readsOk++; result } else { readsFailed++; null }
         } catch (e: SocketTimeoutException) {
             readsFailed++
@@ -1089,6 +1096,10 @@ class MemoryProducer(private val profile: MemoryProfile) {
         }
         // Freshness means "data actually came back this poll", not "the loop ran".
         if (readsOk == okAtPollStart) return
+        // A producer stopped mid-poll must not stamp freshness either — the stamp
+        // is global, and a retired instance vouching for it masks the gap until
+        // the replacement's first completed poll.
+        if (!running) return
         BridgeCore.lastMemoryPollAt = System.currentTimeMillis()
         val state = JSONObject()
         state.put("type", "state")
@@ -1123,19 +1134,16 @@ class MemoryProducer(private val profile: MemoryProfile) {
             // the run. Loading a savestate is the case that bites: the world
             // changes wholesale while the cache still describes the old one.
             val fresh = System.currentTimeMillis() - 60000
+            val allFresh = boxSweptAt.all { it > fresh }
             val boxArr = JSONArray()
-            var anyFresh = false
-            for (i in boxContents.indices) if (boxSweptAt[i] > fresh) {
-                anyFresh = true
-                for (m in boxContents[i]) boxArr.put(m)
-            }
-            // Emit the key whenever ANY box was confirmed recently — including an
-            // EMPTY array. Omitting the key on empty conflated "the PC is
-            // genuinely empty" with "the sweep stalled / all boxes went stale",
-            // and since an absent key means "no change" to the tracker, emptying
-            // the PC left it holding the last box list forever. Absent now means
-            // exactly "boxes unknown".
-            if (anyFresh) state.put("box", boxArr)
+            for (i in boxContents.indices) for (m in boxContents[i]) boxArr.put(m)
+            // Emit the key only when ALL 14 boxes were confirmed recently —
+            // including an EMPTY array. A fresh producer instance has swept only
+            // its first few boxes for the first ~14s; emitting a partial list as
+            // authoritative (including "[]" = "PC is empty") claimed knowledge it
+            // did not have. All-fresh means the array is the complete PC; absent
+            // still strictly means unknown.
+            if (allFresh) state.put("box", boxArr)
         }
         if (route != null) state.put("route", route)
         // Which of the region's maps this actually is. Sent alongside the name so a
