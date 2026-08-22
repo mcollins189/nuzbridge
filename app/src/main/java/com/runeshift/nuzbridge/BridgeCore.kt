@@ -130,6 +130,29 @@ object BridgeCore {
         startMemoryProducer(ctx)?.let { lastFailure = it }
     }
 
+    /**
+     * Restart the memory producer if it has gone quiet.
+     *
+     * `running` alone is not liveness -- it is a flag the producer sets about itself, and a
+     * thread that died with it still true reports perfect health forever. The heartbeat is
+     * lastMemoryPollAt, which only a completed poll advances, so silence is the honest
+     * test. A deliberate wrong-profile pause is NOT silence in that sense: it keeps
+     * looping and holds a state we want held.
+     *
+     * Cheap and idempotent -- call it from anywhere that notices the feed is quiet.
+     */
+    fun ensureMemoryAlive(ctx: Context, quietMs: Long = 15000L): Boolean {
+        val p = memoryProducer ?: return false
+        if (lastMemoryPollAt == 0L) return false          // never polled yet: still starting
+        val quiet = System.currentTimeMillis() - lastMemoryPollAt
+        if (quiet < quietMs) return false
+        stopMemoryProducer()
+        val err = startMemoryProducer(ctx)
+        lastFailure = err ?: "memory producer was silent for ${quiet / 1000}s - restarted"
+        notifyChanged()
+        return true
+    }
+
     fun addListener(fn: () -> Unit) { listeners.add(fn) }
     fun removeListener(fn: () -> Unit) { listeners.remove(fn) }
     fun notifyChanged() { for (l in listeners) runCatching { l() } }

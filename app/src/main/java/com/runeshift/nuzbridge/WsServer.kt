@@ -32,7 +32,12 @@ class WsServer(port: Int, host: String = "127.0.0.1", private val currentState: 
         clientCount = connections.size
         val hello = JSONObject()
         hello.put("type", "hello")
-        hello.put("source", "ocr")
+        // NO "source" here. This handshake announces the SERVER, not a producer, and the
+        // hardcoded "ocr" was a leftover from when OCR was the only one. The tracker
+        // applied it, so every connection opened labelled OCR and only corrected once a
+        // memory frame arrived -- and where frames never started (paused, cartridge/run
+        // mismatch, no run picked) the pill sat on OCR while plainly connected to the
+        // memory reader. Only a 'state' frame knows what produced it, so only it says.
         hello.put("game", BridgeCore.gameKey)
         conn.send(hello.toString())
         // A tracker connecting after detection has already run would otherwise

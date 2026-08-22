@@ -28,6 +28,12 @@ class BridgeAccessibilityService : AccessibilityService() {
     private val tick = object : Runnable {
         override fun run() {
             val memoryFresh = System.currentTimeMillis() - BridgeCore.lastMemoryPollAt < 5000
+            // This tick is the only thing already watching the memory heartbeat, so it is
+            // where a dead producer gets noticed. Falling back to OCR treated the symptom
+            // and hid the cause: the feed switched to OCR, which has nothing useful for
+            // most of these hacks, and the memory reader stayed dead until the switch was
+            // toggled by hand. Try to revive it BEFORE handing over.
+            if (!memoryFresh) BridgeCore.appContext?.let { BridgeCore.ensureMemoryAlive(it) }
             if (BridgeCore.scanning && !busy && !memoryFresh) scanOnce()
             handler.postDelayed(this, BridgeCore.SCAN_INTERVAL_MS)
         }

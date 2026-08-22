@@ -104,6 +104,19 @@ class MemoryProducer(private val profile: MemoryProfile) {
         var ticks = 0L
         try {
             while (running) {
+              // Nothing inside one iteration is worth the whole producer. A Throwable that
+              // escaped here killed the thread while `running` stayed true, which made a
+              // DEAD producer indistinguishable from a healthy one: start() bails on
+              // `if (running) return`, startMemoryProducer() bails on
+              // `memoryProducer?.running == true`, and reloadMemoryProducerForGame() bails
+              // too -- so nothing could ever restart it, and only toggling the memory
+              // switch by hand recovered. Meanwhile lastMemoryPollAt froze, the
+              // accessibility service saw a stale feed and handed over to OCR, and the
+              // tracker showed "ocr" and then went stale. Reported after a savestate load,
+              // which is exactly when RetroArch momentarily vanishes. Thread.sleep and
+              // mismatched() sat outside every existing catch; now the whole body is
+              // covered.
+              try {
                 val okBefore = readsOk
                 // Check the cartridge before the first poll, then every ~10 s.
                 // Doing it first matters: otherwise the opening poll of a
@@ -172,8 +185,17 @@ class MemoryProducer(private val profile: MemoryProfile) {
                 // move (field report: turn focus followed, target focus didn't).
                 // Overworld state changes at walking pace, so keep 1 Hz there.
                 Thread.sleep(if (inBattleNow) 400L else 1000L)
+              } catch (e: InterruptedException) {
+                running = false          // a real stop request: honour it, do not spin
+              } catch (e: Throwable) {
+                lastError = "producer: ${e.message ?: e.javaClass.simpleName}"
+                runCatching { Thread.sleep(1000L) }
+              }
             }
         } finally {
+            // ALWAYS, on every exit path. This is the flag every restart path tests, so
+            // leaving it true after the thread is gone is what made the failure permanent.
+            running = false
             runCatching { sock.close() }
         }
     }
