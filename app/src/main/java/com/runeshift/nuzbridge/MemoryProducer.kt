@@ -941,7 +941,12 @@ class MemoryProducer(private val profile: MemoryProfile) {
                     // NAMES sit at base+0x8344, which is 4 + 14*2400.
                     val stride = a.boxStride
                     val boxBytes = 30 * stride
-                    val boxBase = storage + 4 + boxCursor.toLong() * a.boxSpan.toLong()
+                    // Bytes before the box array inside gPokemonStorage. Vanilla is 4 (a u8
+            // currentBox plus padding). Tourmaline uses 48: its box names sit at
+            // base+0x8370 rather than base+0x8344, and 0x8370-48 is exactly
+            // 14*30*80 = 33600, so the ARRAY is standard and only the prologue differs.
+            // Hardcoding 4 would have read every box 44 bytes early.
+            val boxBase = storage + a.boxesOffset + boxCursor.toLong() * a.boxSpan.toLong()
                     val blk = ByteArray(boxBytes)
                     var ok = true
                     var got = 0
@@ -1263,6 +1268,10 @@ class MemoryProfile(json: JSONObject) {
         val execFlags = o.optLong("execFlags", 0L)
         val targetCursor = o.optLong("targetCursor", 0L)
         val storagePtr = o.optLong("storagePtr", 0L)
+        // Offset of the box array within gPokemonStorage. 4 in vanilla; a build may put
+        // more in front of it (Tourmaline: 48). Verified per game against the box-name
+        // address, which must land at boxesOffset + boxCount*boxSpan.
+        val boxesOffset = o.optInt("boxesOffset", 4)
         // Bytes per box slot. 80 is the vanilla Gen-3 BoxPokemon; CFRU compresses it (58 on
         // Unbound, verified against live RAM — five Pokemon in box 1 that the 80-byte walk
         // could not see past the first).

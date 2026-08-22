@@ -171,6 +171,14 @@
    "match": [
     "pisces"
    ]
+  },
+  "tourmaline": {
+   "crc32": [
+    "24E7220C"
+   ],
+   "match": [
+    "tourmaline"
+   ]
   }
  }
 }

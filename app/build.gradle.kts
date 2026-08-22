@@ -11,8 +11,8 @@ android {
         applicationId = "com.runeshift.nuzbridge"
         minSdk = 30          // AccessibilityService.takeScreenshot(displayId) needs API 30
         targetSdk = 36
-        versionCode = 114
-        versionName = "1.14"
+        versionCode = 115
+        versionName = "1.15"
         // The AYN Thor (Snapdragon) is arm64-only; shipping the other ABIs'
         // OCR libs tripled the APK for nothing.
         ndk { abiFilters += "arm64-v8a" }
